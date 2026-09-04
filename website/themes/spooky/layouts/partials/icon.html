@@ -1,0 +1,25 @@
+{{/* Inline SVG icon by name. Inline because the site must build and render
+     with no network: no icon font, no sprite fetch, no CDN.
+
+     Call as: {{ partial "icon.html" (dict "name" "shield" "size" 20) }}
+     Unknown names fall back to "check" so bad content data degrades to a
+     drawn icon rather than an empty box. All icons are 24x24 stroke icons
+     that inherit currentColor. */}}
+{{- $size := .size | default 20 -}}
+{{- $icons := dict
+  "layers" `<path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>`
+  "shield" `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>`
+  "check" `<path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/>`
+  "refresh" `<path d="M21 12a9 9 0 1 1-9-9"/><polyline points="21 3 21 9 15 9"/>`
+  "keyboard" `<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M12 10h.01M17 10h.01M7 14h10"/>`
+  "install" `<path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 19h16"/>`
+  "terminal" `<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`
+  "plug" `<path d="M9 2v6M15 2v6"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v5"/>`
+  "database" `<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>`
+  "mail" `<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>`
+  "chart" `<path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-3"/>`
+  "lock" `<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>`
+-}}
+{{- $inner := index $icons (.name | default "check") -}}
+{{- if not $inner }}{{ $inner = index $icons "check" }}{{ end -}}
+<svg width="{{ $size }}" height="{{ $size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">{{ $inner | safeHTML }}</svg>

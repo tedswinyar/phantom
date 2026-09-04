@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Lang }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  {{ partial "nav.html" . }}
+  <main>
+    {{ block "main" . }}{{ end }}
+  </main>
+  {{ partial "footer.html" . }}
+  <div class="lightbox" id="lightbox" hidden>
+    <img alt="" />
+  </div>
+  <script>
+    (function () {
+      var box = document.getElementById('lightbox');
+      var img = box.querySelector('img');
+      document.addEventListener('click', function (e) {
+        var link = e.target.closest('a.screenshot-zoom');
+        if (link) {
+          e.preventDefault();
+          img.src = link.href;
+          img.alt = link.getAttribute('aria-label') ||
+                    (link.querySelector('img') && link.querySelector('img').alt) ||
+                    'Screenshot (no description available)';
+          box.hidden = false;
+          document.body.style.overflow = 'hidden';
+          return;
+        }
+        if (!box.hidden) {
+          box.hidden = true;
+          img.src = '';
+          document.body.style.overflow = '';
+        }
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !box.hidden) {
+          box.hidden = true;
+          img.src = '';
+          document.body.style.overflow = '';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

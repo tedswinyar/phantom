@@ -1,0 +1,22 @@
+# Release identity — copy to scripts/release.conf (gitignored) and fill in.
+# Without this file, builds are ad-hoc signed and notarization is skipped:
+# fine for local use, Gatekeeper will warn on other Macs.
+
+# Developer ID Application certificate, exactly as `security find-identity -p
+# codesigning -v` prints it:
+#SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID1234)"
+
+# Keychain profile for notarytool. One-time setup:
+#   xcrun notarytool store-credentials phantom-notarize \
+#       --apple-id <apple-id> --team-id <team-id>
+#NOTARIZE_PROFILE="phantom-notarize"
+
+# Optional self-healing: when the keychain profile becomes inaccessible
+# (data-protection keychain locks after sleep/iCloud events), build-dmg.sh
+# re-provisions it non-interactively if these are exported in the
+# environment (do NOT put the password in this file):
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_SPECIFIC_PASSWORD
+
+# Website deploy target for publish.sh (see website/infra/README.md):
+#WEBSITE_BUCKET=""
+#WEBSITE_DISTRIBUTION_ID=""

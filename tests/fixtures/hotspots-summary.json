@@ -1,0 +1,50 @@
+{
+  "groups": [
+    {
+      "ruleId": "cargo-target",
+      "label": "Rust target/ directories",
+      "category": "staleProjectArtifact",
+      "hint": "`cargo clean` or delete; the next `cargo build` regenerates it",
+      "command": "cargo clean",
+      "diskSize": 17179869184,
+      "listedDiskSize": 17179869184,
+      "logicalSize": 18179869184,
+      "fileCount": 5120,
+      "topPaths": [
+        "/Users/ghost/Code/dormant/target"
+      ]
+    },
+    {
+      "ruleId": "dot-cache",
+      "label": "~/.cache",
+      "category": "toolManagedCache",
+      "hint": "per-tool clean commands (`uv cache clean`, `pnpm store prune`); hardlinked stores free less than they list",
+      "command": null,
+      "diskSize": 5368709120,
+      "listedDiskSize": 18253611008,
+      "logicalSize": 18253611008,
+      "fileCount": 84211,
+      "topPaths": [
+        "/Users/ghost/.cache"
+      ]
+    },
+    {
+      "ruleId": "cloud-dataloaded",
+      "label": "Cloud-dataloaded placeholders",
+      "category": "cloudDataloaded",
+      "hint": "contents live in the cloud; local blocks are ~0 \u2014 deleting frees almost nothing",
+      "command": null,
+      "diskSize": 147456,
+      "listedDiskSize": 147456,
+      "logicalSize": 154140672,
+      "fileCount": 312,
+      "topPaths": [
+        "/Users/ghost/Library/CloudStorage/OneDrive/big.pptx"
+      ]
+    }
+  ],
+  "reclaimEstimate": 22548578304,
+  "reviewDiskSize": 0,
+  "cloudDataloadedLogicalSize": 154140672,
+  "cloudDataloadedDiskSize": 147456
+}

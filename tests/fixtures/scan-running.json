@@ -1,0 +1,18 @@
+{
+    "id": "0b54b774-19a1-4373-a423-77aa93e40e5b",
+    "rootPath": "/Users/ghost",
+    "status": "running",
+    "startedAt": "2026-03-17T14:30:00Z",
+    "finishedAt": null,
+    "totalDiskSize": 0,
+    "totalLogicalSize": 0,
+    "fileCount": 0,
+    "dirCount": 0,
+    "errorCount": 0,
+    "unreadablePaths": [],
+    "progress": {
+        "filesSeen": 1337,
+        "bytesSeen": 987654321,
+        "currentPath": "/Users/ghost/Library/Caches/deep/file.bin"
+    }
+}

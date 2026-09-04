@@ -1,0 +1,17 @@
+{
+    "id": "e7ae86e2-308b-444c-8a3d-cd21467ab442",
+    "rootPath": "/Users/ghost/Code",
+    "status": "complete",
+    "startedAt": "2026-03-17T14:30:00.123456Z",
+    "finishedAt": "2026-03-17T14:31:05.654321Z",
+    "totalDiskSize": 123456789,
+    "totalLogicalSize": 223456789,
+    "fileCount": 4200,
+    "dirCount": 310,
+    "errorCount": 2,
+    "unreadablePaths": [
+        {"path": "/Users/ghost/Code/locked", "reason": "Permission denied (os error 13)"},
+        {"path": "/Users/ghost/Code/vanished.tmp", "reason": "No such file or directory (os error 2)"}
+    ],
+    "progress": null
+}

@@ -1,0 +1,11 @@
+<nav>
+  <a href="{{ "/" | relURL }}" class="logo">
+    <span class="logo-mark">{{ site.Params.logo_mark | default "👻" }}</span>
+    <span class="logo-text">{{ site.Params.logo_text | default site.Title }}</span>
+  </a>
+  <ul>
+    {{ range .Site.Menus.main }}
+    <li><a href="{{ .URL | relURL }}">{{ .Name }}</a></li>
+    {{ end }}
+  </ul>
+</nav>

@@ -1,0 +1,186 @@
+{{/* The landing page. Every string here comes from content/_index.md front
+     matter or site params — the theme carries no product copy, so a stamped
+     project rewrites the landing page without touching the theme. Each block
+     is wrapped in `with`, so a section you delete from the front matter simply
+     stops rendering. */}}
+{{ define "main" }}
+{{- $hero := .Params.hero | default dict -}}
+<section class="hero">
+  <span class="hero-mark">{{ site.Params.logo_mark | default "👻" }}</span>
+  <h1>{{ $hero.headline | default site.Title }}</h1>
+  {{ with $hero.tagline | default site.Params.tagline }}<p class="tagline">{{ . }}</p>{{ end }}
+  {{ with $hero.audience }}<p class="hero-audience">{{ . }}</p>{{ end }}
+  {{- $primary := $hero.cta_primary | default dict -}}
+  {{- $secondary := $hero.cta_secondary | default dict -}}
+  {{ if or $primary.label $secondary.label }}
+  <div class="cta">
+    {{ with $primary.label }}<a href="{{ $primary.url | default "/download/" | relURL }}" class="btn btn-primary">{{ . }}</a>{{ end }}
+    {{ with $secondary.label }}<a href="{{ $secondary.url | default "#how-it-works" }}" class="btn btn-secondary">{{ . }}</a>{{ end }}
+  </div>
+  {{ end }}
+  {{ with $hero.requirements }}<p class="hero-req">{{ . | safeHTML }}</p>{{ end }}
+</section>
+
+{{ with $hero.screenshot }}
+<div class="screenshot-showcase">
+  {{ partial "screenshot.html" (dict
+      "src" .
+      "alt" ($hero.screenshot_alt | default (printf "%s screenshot" site.Title))
+      "title" ($hero.screenshot_title | default "Hero screenshot")
+      "body" ($hero.screenshot_body | default "Capture the app's main window and save it here.")
+      "sizes" "(max-width: 1200px) 100vw, 1100px") }}
+</div>
+{{ end }}
+
+{{ with .Params.sections }}
+<section id="how-it-works" class="core-loop">
+  {{ with $.Params.sections_header }}
+  <div class="section-header">
+    <h2>{{ .title }}</h2>
+    {{ with .subtitle }}<p>{{ . }}</p>{{ end }}
+  </div>
+  {{ end }}
+  {{ range $i, $s := . }}
+  <div class="loop-row{{ if eq (mod $i 2) 1 }} reverse{{ end }}">
+    <div class="loop-media">
+      {{ partial "screenshot.html" (dict
+          "src" ($s.image | default "images/missing.png")
+          "alt" ($s.image_alt | default $s.title)
+          "title" $s.title
+          "body" ($s.image_body | default $s.body)) }}
+    </div>
+    <div class="loop-copy">
+      {{ with $s.eyebrow }}<span class="loop-eyebrow">{{ . }}</span>{{ end }}
+      <h3>{{ $s.title }}</h3>
+      <p>{{ $s.body | safeHTML }}</p>
+    </div>
+  </div>
+  {{ end }}
+</section>
+{{ end }}
+
+{{ with .Params.highlights }}
+{{ with $.Params.highlights_header }}
+<div class="section-header">
+  <h2>{{ .title }}</h2>
+  {{ with .subtitle }}<p>{{ . }}</p>{{ end }}
+</div>
+{{ end }}
+<section class="native-grid">
+  {{ range $i, $h := . }}
+  <div class="native-item">
+    <div class="native-icon{{ if eq (mod $i 2) 1 }} alt{{ end }}">
+      {{ partial "icon.html" (dict "name" $h.icon "size" 20) }}
+    </div>
+    <div><h4>{{ $h.title }}</h4><p>{{ $h.body | safeHTML }}</p></div>
+  </div>
+  {{ end }}
+</section>
+{{ end }}
+
+{{ with .Params.integration }}
+<section class="agents-section" id="{{ .anchor | default "integration" }}">
+  <div class="agents-inner">
+    <div class="agents-copy">
+      {{ with .eyebrow }}<span class="loop-eyebrow">{{ . }}</span>{{ end }}
+      <h2>{{ .title }}</h2>
+      {{ with .body }}<p>{{ . | safeHTML }}</p>{{ end }}
+      {{ with .bullets }}
+      <ul class="agent-bullets">
+        {{ range . }}<li>{{ . | safeHTML }}</li>{{ end }}
+      </ul>
+      {{ end }}
+      {{ with .footnote }}<p class="agent-clients">{{ . | safeHTML }}</p>{{ end }}
+    </div>
+    {{ with .config_code }}
+    <div class="agents-config">
+      <div class="agents-config-header">
+        <span class="agents-config-title">{{ $.Params.integration.config_name | default "config" }}</span>
+        {{ with $.Params.integration.config_hint }}<span class="agents-config-hint">{{ . }}</span>{{ end }}
+      </div>
+<pre><code>{{ . }}</code></pre>
+      {{ with $.Params.integration.config_foot }}<p class="agents-config-foot">{{ . | safeHTML }}</p>{{ end }}
+    </div>
+    {{ end }}
+  </div>
+</section>
+{{ end }}
+
+{{ with .Params.features }}
+{{ with $.Params.features_header }}
+<div class="section-header">
+  <h2>{{ .title }}</h2>
+  {{ with .subtitle }}<p>{{ . }}</p>{{ end }}
+</div>
+{{ end }}
+<section class="features">
+  {{ range $i, $f := . }}
+  <div class="feature-card">
+    {{/* Indices 1 and 4 get the alt tint, matching the nth-child(2)/(5)
+         accent rules in style.css. */}}
+    <div class="feature-icon-box{{ if eq (mod $i 3) 1 }} alt{{ end }}">
+      {{ partial "icon.html" (dict "name" $f.icon "size" 24) }}
+    </div>
+    <h3>{{ $f.title }}</h3>
+    <p>{{ $f.body | safeHTML }}</p>
+  </div>
+  {{ end }}
+</section>
+{{ end }}
+
+{{ with .Content }}
+<div class="builder-philosophy">
+  <div class="philosophy-inner">
+    {{ . }}
+  </div>
+</div>
+{{ end }}
+
+{{ with .Params.proof }}
+<section class="proof-section">
+  {{ with $.Params.proof_header }}
+  <div class="section-header">
+    <h2>{{ .title }}</h2>
+    {{ with .subtitle }}<p>{{ . }}</p>{{ end }}
+  </div>
+  {{ end }}
+  <div class="proof-inner">
+    {{ range . }}
+    <div class="proof-item">
+      {{ with .badge }}<span class="proof-badge">{{ . }}</span>{{ end }}
+      {{ with .metric }}<div class="proof-metric">{{ . }}</div>{{ end }}
+      {{ with .title }}<h3>{{ . }}</h3>{{ end }}
+      {{ with .body }}<p>{{ . | safeHTML }}</p>{{ end }}
+      {{ with .image }}
+      <div class="proof-image">
+        {{ partial "screenshot.html" (dict
+            "src" .
+            "alt" ($.image_alt | default "Demonstration")
+            "title" ($.title | default "")
+            "body" ($.image_body | default "")) }}
+      </div>
+      {{ end }}
+    </div>
+    {{ end }}
+  </div>
+</section>
+{{ end }}
+
+{{ with .Params.closing_cta }}
+<section class="closing-cta">
+  <div class="closing-cta-inner">
+    {{ with .eyebrow }}<span class="cta-eyebrow">{{ . }}</span>{{ end }}
+    <h2>{{ .title }}</h2>
+    {{ with .body }}<p>{{ . | safeHTML }}</p>{{ end }}
+    <div class="cta">
+      {{ with .cta_primary }}
+        <a href="{{ .url | relURL }}" class="btn btn-primary">{{ .label }}</a>
+      {{ end }}
+      {{ with .cta_secondary }}
+        <a href="{{ .url | relURL }}" class="btn btn-secondary">{{ .label }}</a>
+      {{ end }}
+    </div>
+  </div>
+</section>
+{{ end }}
+{{ end }}

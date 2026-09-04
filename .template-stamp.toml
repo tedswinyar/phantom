@@ -1,0 +1,11 @@
+# Written by spooky-shell's init.sh. Records where this project came from so
+# improvements can flow both ways (see TEMPLATE.md's backport protocol).
+stamped = true
+name = "Phantom"
+slug = "phantom"
+template = "spooky-shell"
+template_commit = "15c78cf66b111142d54df8e538b607b308212ba0"
+stamp_date = "2026-08-20"
+api_port = 8768
+package = "Phantom"
+layers_pruned = []

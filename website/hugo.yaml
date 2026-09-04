@@ -1,0 +1,85 @@
+# Site config for the template's website layer.
+#
+# scripts/init.sh rewrites `baseURL` at stamp time (from --domain, or leaves
+# the TODO marker below) and substitutes the project name everywhere it
+# appears. Everything else here is yours to edit: this file is the only place
+# a stamped project needs to touch to re-brand and re-skin the site. See
+# themes/spooky/README.md for the full param list.
+baseURL: https://TODO-stamp-set-your-domain.example.com/
+defaultContentLanguage: en
+languages:
+  en:
+    locale: en-US
+    weight: 1
+title: "Phantom"
+theme: spooky
+
+# A single-product marketing site has nothing to categorise, and Hugo would
+# otherwise publish empty /tags/ and /categories/ pages that show up in the
+# sitemap. Delete this if you start writing a blog.
+disableKinds:
+  - taxonomy
+  - term
+
+params:
+  description: "A macOS disk-space analyzer that measures what files actually occupy on disk and classifies what's safe to reclaim — native app, CLI, and MCP server, all local, never deleting a byte."
+  author: "Ted Swinyar"
+  tagline: "See what's haunting your disk — and what's safe to reclaim."
+
+  # Brand marks. logo_mark is reused for the nav logo, the hero, and the
+  # favicon (as an inline data URI — nothing is fetched).
+  logo_mark: "👻"
+  logo_text: "phantom"
+
+  footer_note: "Phantom never deletes files. It measures, classifies, and suggests — the command is yours to run."
+  footer_copy: "Built by Ted Swinyar."
+
+  radius: "16px"
+
+  # Palette: Phantom's ghost theme. Spectral violet is the primary accent,
+  # ectoplasm mint the secondary, a ghostly cyan the third; the darks carry a
+  # faint violet cast. The theme derives every glow, hover border, and badge
+  # fill from the three accents.
+  # Keys must stay lowercase/snake_case; Hugo lowercases config keys.
+  colors:
+    bg: "#0b0a12"
+    surface: "#141221"
+    border: "#241f38"
+    accent: "#a78bfa"
+    accent_hover: "#c4b5fd"
+    accent_alt: "#6ee7b7"
+    info: "#7dd3fc"
+    text: "#ece9f7"
+    text_dim: "#a29bc0"
+    text_muted: "#6b6486"
+
+  # System font stacks only, deliberately: a web font would mean a network
+  # fetch, and the site must build and render fully offline.
+  fonts:
+    sans: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif"
+    mono: "'SF Mono', 'Fira Code', 'JetBrains Mono', monospace"
+
+markup:
+  goldmark:
+    renderer:
+      # Content pages hand-write some HTML (the architecture diagram), so raw
+      # HTML in markdown must pass through.
+      unsafe: true
+
+menu:
+  main:
+    - name: Features
+      url: /features/
+      weight: 1
+    - name: Docs
+      url: /docs/
+      weight: 2
+    - name: Download
+      url: /download/
+      weight: 3
+    - name: Changelog
+      url: /changelog/
+      weight: 4
+    - name: Architecture
+      url: /architecture/
+      weight: 5

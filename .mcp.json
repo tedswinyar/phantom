@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "phantom": {
+      "command": "/Applications/Phantom.app/Contents/MacOS/phantom-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

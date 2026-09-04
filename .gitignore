@@ -1,0 +1,57 @@
+# Rust
+rust/target/
+target/
+
+# Swift
+swift/.build/
+.build/
+*.xcresult
+
+# Runtime state (verify logs, locks, dev databases)
+.runtime/
+
+# Build products
+build/
+dist/
+
+# Website
+website/public/
+website/.hugo_build.lock
+website/resources/_gen/
+
+# Release identity — NEVER commit; see scripts/release.conf.example
+scripts/release.conf
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local agent state
+.claude/settings.local.json
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# NEVER commit hook binaries. On a corporate-managed machine the security
+# tooling's daemon can write large binary shims into .beads/hooks when a
+# hooksPath override exists, and bd init auto-commits its directory — this
+# repo had to rewrite history once to remove them. bd's real shims belong
+# in .git/hooks.
+.beads/hooks/
+
+# Package build output (from the original package's .gitignore).
+/build
+
+# cargo-cyclonedx intermediates (release.sh copies the keepers into sbom/)
+rust/**/*.cdx.json
+
+# Session handoff state — private planning, never shipped publicly.
+/HANDOFF.md

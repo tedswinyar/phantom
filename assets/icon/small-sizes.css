@@ -1,0 +1,6 @@
+/* Applied by scripts/make-icon.sh when rendering the 16px and 32px reps.
+ * At those sizes the treemap seams turn to mush, so the small reps drop the
+ * tiling (solid violet ghost) and enlarge the eyes so the face survives. */
+#treemap { display: none; }
+#ghost-body { fill: #a78bfa; }
+#eyes { transform: translate(512px, 430px) scale(1.45) translate(-512px, -430px); }

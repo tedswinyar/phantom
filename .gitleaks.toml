@@ -1,0 +1,32 @@
+# gitleaks configuration — secret scanning before anything goes public.
+# Run: gitleaks detect --config .gitleaks.toml
+
+[extend]
+# Start from the battle-tested default ruleset.
+useDefault = true
+
+[allowlist]
+description = "Template allowlist"
+# Match allowlist regexes against the whole LINE, not just the extracted
+# secret — required for the record-shape rules below.
+regexTarget = "line"
+paths = [
+    # Test fixtures contain fake UUIDs that can trip entropy rules.
+    '''tests/fixtures/.*''',
+    # The API key header name appears throughout docs and specs.
+    '''open-prompt-edition/.*\.md''',
+]
+regexes = [
+    # Beads memory records in the issues export: the JSON is literally
+    # {"_type":"memory","key":"<slug>"} and the generic-api-key rule fires
+    # on the "key" field name. The slug is a memory NAME, not a credential.
+    # Scoped to the exact record shape so real secrets in .beads still trip.
+    '''\{"_type":"memory","key":"[a-z0-9-]+"''',
+    # The sample key-file paths and header names are not secrets.
+    '''x-api-key''',
+    '''PHANTOM_API_KEY''',
+    # The canonical shared TEST UUID used across fixtures and unit tests
+    # (e.g. auth.rs's constant-time-compare test). A fixed, published test
+    # constant — not a credential. Scoped to the exact value, not a pattern.
+    '''e7ae86e2-308b-444c-8a3d-cd21467ab442''',
+]

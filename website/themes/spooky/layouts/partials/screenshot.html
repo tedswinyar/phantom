@@ -1,0 +1,48 @@
+{{/* Responsive screenshot with click-to-zoom, degrading twice.
+
+     Three cases, because all three happen in a template-born project:
+
+     1. `assets/<src>` exists — resize it and emit a srcset. Retina captures
+        are 250-600KB and must not be shipped at full weight into a 600px
+        slot. The format is left alone so the build works on any Hugo edition;
+        if yours is the extended edition, appending `webp q88` to the Resize
+        specs roughly halves these.
+     2. `static/<src>` exists — emit a plain <img> at its published URL. Hugo
+        cannot process static files, so there is no srcset, but a real
+        unoptimized screenshot beats a placeholder. Move the file into
+        assets/ to get case 1.
+     3. Neither — render the dashed placeholder. This is the normal state of a
+        freshly stamped project, so it must not fail the build.
+
+     Params: src (path under assets/ or static/), alt, sizes (optional),
+     title/body (optional placeholder copy). */}}
+{{- $img := resources.Get .src -}}
+{{- $alt := .alt -}}
+{{- $sizes := .sizes | default "(max-width: 900px) 100vw, 600px" -}}
+{{- $static := path.Join "static" .src -}}
+{{- if $img -}}
+{{- $w600 := $img.Resize "600x" -}}
+{{- $w900 := $img.Resize "900x" -}}
+{{- $w1200 := $img.Resize "1200x" -}}
+{{- $full := $img | fingerprint -}}
+<a href="{{ $full.RelPermalink }}" class="screenshot-zoom" aria-label="View full-size screenshot: {{ $alt }}">
+  <img
+    src="{{ $w600.RelPermalink }}"
+    srcset="{{ $w600.RelPermalink }} 600w, {{ $w900.RelPermalink }} 900w, {{ $w1200.RelPermalink }} 1200w"
+    sizes="{{ $sizes }}"
+    width="{{ $w1200.Width }}" height="{{ $w1200.Height }}"
+    alt="{{ $alt }}"
+    loading="lazy" decoding="async" />
+</a>
+{{- else if fileExists $static -}}
+{{- $url := .src | relURL -}}
+<a href="{{ $url }}" class="screenshot-zoom" aria-label="View full-size screenshot: {{ $alt }}">
+  <img src="{{ $url }}" alt="{{ $alt }}" loading="lazy" decoding="async" />
+</a>
+{{- else -}}
+<div class="placeholder" role="img" aria-label="{{ $alt }}">
+  <span class="placeholder-badge">Screenshot pending</span>
+  <span class="placeholder-title">{{ .title | default "Screenshot goes here" }}</span>
+  <p class="placeholder-body">{{ .body | default $alt }}</p>
+</div>
+{{- end -}}
