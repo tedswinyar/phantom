@@ -1,0 +1,45 @@
+{
+  "rootPath": "/Users/ghost",
+  "groupBy": "topLevelDir",
+  "points": [
+    {
+      "scanId": "11111111-1111-4111-8111-111111111111",
+      "startedAt": "2026-09-01T09:00:00.000000Z",
+      "totalDiskSize": 100000000000,
+      "totalPrivateSize": null,
+      "fileCount": 1001
+    },
+    {
+      "scanId": "22222222-2222-4222-8222-222222222222",
+      "startedAt": "2026-09-04T09:00:00.000000Z",
+      "totalDiskSize": 130000000000,
+      "totalPrivateSize": 120000000000,
+      "fileCount": 1004
+    },
+    {
+      "scanId": "33333333-3333-4333-8333-333333333333",
+      "startedAt": "2026-09-07T09:00:00.000000Z",
+      "totalDiskSize": 160000000000,
+      "totalPrivateSize": 150000000000,
+      "fileCount": 1007
+    }
+  ],
+  "series": [
+    { "key": "Code", "values": [60000000000, 80000000000, 90000000000] },
+    { "key": "Library", "values": [30000000000, 40000000000, 50000000000] },
+    { "key": "Movies", "values": [0, 2000000000, 5000000000] },
+    { "key": "other", "values": [10000000000, 8000000000, 15000000000] }
+  ],
+  "forecast": {
+    "method": "linear",
+    "pointsUsed": 3,
+    "spanDays": 6.0,
+    "bytesPerDay": 10000000000,
+    "latestBytes": 160000000000,
+    "availableBytes": 600000000000,
+    "daysUntilFull": 60.0,
+    "projectedFullAt": "2026-11-06T09:00:00.000000Z",
+    "caveat": "Linear fit through this root's completed scans: it assumes the recent rate continues, that nothing is reclaimed, and that this root is the only thing filling the volume — none of which holds for long. Fewer than three points is a line through noise, not a trend. Points with totalPrivateSize null predate the clone-aware walker and counted APFS clones twice, so the earliest values run a few GB high."
+  },
+  "note": "points are this root's completed scans, oldest first; series values align with points positionally (null = that scan recorded nothing for this breakdown, 0 = recorded as absent). Only the newest 25 scans of each root (100 overall) are kept, so the history is as long as the retention window, not as long as the disk's."
+}

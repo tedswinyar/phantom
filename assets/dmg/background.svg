@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Phantom DMG installer background — source of truth.
+  Rendered at 2x (1320x800 px for a 660x400 pt Finder window) with 144 DPI
+  stamped by scripts/make-dmg-background.sh so Retina Finder draws it sharp.
+
+  GEOMETRY CONTRACT with build-dmg.sh (change together or the arrow points
+  at nothing): window content 660x400 pt; icon size 128; Phantom.app icon
+  CENTERED at (165, 180); Applications alias CENTERED at (495, 180). The
+  arrow spans the gap between them.
+
+  Palette: site darks #0b0a12/#141221/#241f38, spectral violet #a78bfa,
+  ectoplasm mint #6ee7b7 (assets/icon/AppIcon.svg).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141221"/>
+      <stop offset="1" stop-color="#0b0a12"/>
+    </linearGradient>
+    <radialGradient id="glowL" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#b8a5fc" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowR" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#8beecb" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#6ee7b7" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Soft lift specifically under the icon LABELS (Finder renders them
+         in black over background pictures, unscriptable): a gentle pale
+         ellipse behind each label line keeps the text readable without
+         reading as a spotlight. -->
+    <radialGradient id="labelLift" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#d8d2f2" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#d8d2f2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#6ee7b7"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="660" height="400" fill="url(#ground)"/>
+
+  <!-- Soft pads under the two icon slots, centered a touch low so the
+       glow carries under the black Finder labels (~y 252-268) -->
+  <circle cx="165" cy="190" r="125" fill="url(#glowL)"/>
+  <circle cx="495" cy="190" r="125" fill="url(#glowR)"/>
+  <!-- Label band: Finder renders 13pt labels for 128pt icons (icon center
+       y=180) centered near y≈274 — measured from a live mount, not the
+       geometry guess (first cut at 259 left the text at the band's bottom
+       edge). -->
+  <ellipse cx="165" cy="268" rx="85" ry="21" fill="url(#labelLift)"/>
+  <ellipse cx="495" cy="268" rx="85" ry="21" fill="url(#labelLift)"/>
+
+  <!-- Faint ghost watermark, bottom-right, echoing the app icon's silhouette -->
+  <g opacity="0.05" transform="translate(520,268) scale(1.05)">
+    <path fill="#a78bfa" d="M60 110 v-52 a52 52 0 0 1 104 0 v52 l-14 -10 -12 10 -13 -10 -12 10 -13 -10 -13 10 -14 -10 z"/>
+    <circle cx="92" cy="52" r="9" fill="#141221"/>
+    <circle cx="132" cy="52" r="9" fill="#141221"/>
+  </g>
+
+  <!-- The drag arrow: violet -> mint, pointing at Applications -->
+  <g>
+    <rect x="252" y="174" width="120" height="12" rx="6" fill="url(#arrow)"/>
+    <path d="M368 158 L408 180 L368 202 Z" fill="#6ee7b7"/>
+  </g>
+
+  <!-- Caption -->
+  <text x="330" y="330" text-anchor="middle"
+        font-family="-apple-system, 'Helvetica Neue', sans-serif"
+        font-size="15" fill="#a78bfa" opacity="0.85">Drag Phantom into Applications</text>
+  <text x="330" y="352" text-anchor="middle"
+        font-family="-apple-system, 'Helvetica Neue', sans-serif"
+        font-size="11" fill="#7d7a92" opacity="0.9">signed &#183; notarized &#183; updates itself</text>
+</svg>

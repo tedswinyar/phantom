@@ -1,0 +1,22 @@
+[
+  {
+    "fileType": "log",
+    "diskSize": 2097152,
+    "fileCount": 3
+  },
+  {
+    "fileType": "bin",
+    "diskSize": 1048576,
+    "fileCount": 42
+  },
+  {
+    "fileType": "rs",
+    "diskSize": 1048576,
+    "fileCount": 7
+  },
+  {
+    "fileType": null,
+    "diskSize": 4096,
+    "fileCount": 1
+  }
+]

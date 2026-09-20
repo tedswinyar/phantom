@@ -1,0 +1,31 @@
+{{/* Selected by `layout: changelog` in a page's front matter.
+
+     Renders every page under content/releases/ newest first, so a release
+     script only has to drop a dated markdown file into that directory and the
+     changelog page picks it up. A project with no releases yet gets an
+     empty-state line rather than a bare heading. */}}
+{{ define "main" }}
+<div class="content">
+  <h1>{{ .Title }}</h1>
+  {{ .Content }}
+</div>
+
+{{ $releases := where .Site.RegularPages "Section" "releases" }}
+{{ with $releases }}
+<section class="changelog-list">
+  {{ range .ByDate.Reverse }}
+  <article class="changelog-entry" id="v{{ .Params.version | default .Title }}">
+    <div class="changelog-head">
+      <span class="changelog-version">{{ .Params.version | default .Title }}</span>
+      {{ if not .Date.IsZero }}<span class="changelog-date">{{ .Date.Format "January 2, 2006" }}</span>{{ end }}
+    </div>
+    <div class="changelog-body">
+      {{ .Content }}
+    </div>
+  </article>
+  {{ end }}
+</section>
+{{ else }}
+<p class="changelog-empty">No releases published yet.</p>
+{{ end }}
+{{ end }}

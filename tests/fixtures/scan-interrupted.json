@@ -1,0 +1,17 @@
+{
+    "id": "3c1a7d2e-5b6f-4e8a-9c0d-1f2e3a4b5c6d",
+    "rootPath": "/Users/ghost",
+    "status": "failed",
+    "startedAt": "2026-03-17T14:30:00.000000Z",
+    "finishedAt": "2026-03-17T14:33:12.000000Z",
+    "totalDiskSize": 0,
+    "totalLogicalSize": 0,
+    "fileCount": 0,
+    "dirCount": 0,
+    "errorCount": 0,
+    "unreadablePaths": [],
+    "totalPrivateSize": 0,
+    "totalSharedSize": 0,
+    "failureReason": "interrupted: the server stopped while this scan was running; scan again",
+    "progress": null
+}
