@@ -1,0 +1,31 @@
+{
+  "planId": "7d0f3a9c-2b41-4c8e-9f65-0a1b2c3d4e5f",
+  "scanId": "e7ae86e2-308b-444c-8a3d-cd21467ab442",
+  "rootPath": "/Users/ghost/Code",
+  "createdAt": "2026-03-17T15:00:00.000000Z",
+  "maxTier": "safe",
+  "minBytes": 0,
+  "items": [
+    {
+      "ruleId": "cargo-target",
+      "label": "Rust target/ directories",
+      "category": "staleProjectArtifact",
+      "riskTier": "safe",
+      "why": "Cargo build output beside a Cargo.toml; `cargo build` recreates it; a lockfile pins the dependency versions; the project's newest source edit and git activity are at least 90 days old.",
+      "command": "cargo clean",
+      "paths": [
+        "/Users/ghost/Code/dormant/target"
+      ],
+      "expectedFreedBytes": 17179869184,
+      "diskSize": 17179869184
+    }
+  ],
+  "itemCount": 1,
+  "expectedFreedBytes": 17179869184,
+  "skipped": {
+    "review": 1,
+    "aboveTier": 2,
+    "belowMinBytes": 0,
+    "tracked": 0
+  }
+}

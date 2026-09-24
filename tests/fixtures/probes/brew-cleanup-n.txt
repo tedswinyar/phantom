@@ -1,0 +1,6 @@
+Warning: Skipping graphviz: most recent version 16.0.0 not installed
+Would remove: /Users/ghost/Library/Caches/Homebrew/ada-url--4.0.0 (336.1KB)
+Would remove: /Users/ghost/Library/Caches/Homebrew/ada-url_bottle_manifest--4.0.0 (21.9KB)
+Would remove: /Users/ghost/Library/Caches/Homebrew/aom--3.15.0 (4.4MB)
+Would remove: /opt/homebrew/Cellar/jq/1.7.1 (2 files, 1.2MB)
+==> This operation would free approximately 5.9MB of disk space.

@@ -1,0 +1,25 @@
+[package]
+name = "phantom-api"
+version.workspace = true
+build = "../build-support/git-describe.rs"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+phantom-core = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+constant_time_eq = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["query"] } # tests use RequestBuilder::query; a 0.13 feature
+tempfile = { workspace = true }

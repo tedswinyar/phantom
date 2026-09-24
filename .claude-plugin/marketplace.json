@@ -1,0 +1,24 @@
+{
+  "name": "phantom",
+  "owner": {
+    "name": "Ted Swinyar"
+  },
+  "plugins": [
+    {
+      "name": "phantom",
+      "source": "./",
+      "description": "Disk-usage analysis for macOS an agent can query — honest sizes, tiered reclaim suggestions, never deletes. Needs Phantom.app installed.",
+      "version": "1.1.1",
+      "homepage": "https://github.com/tedswinyar/phantom",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "disk",
+        "storage",
+        "macos",
+        "cleanup",
+        "mcp"
+      ]
+    }
+  ]
+}

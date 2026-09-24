@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Phantom app icon — source of truth.
+  A friendly ghost whose body is divided into treemap tiles (the Specter Map),
+  on the site's dark-violet ground. Palette: spectral violet #a78bfa family,
+  ectoplasm mint #6ee7b7 accent, darks #0b0a12/#141221/#241f38 (website/hugo.yaml).
+
+  Regenerate all raster artifacts with: scripts/make-icon.sh
+  Small sizes (16/32 px) are rendered with small-sizes.css applied, which hides
+  the treemap tiling and enlarges the eyes so the mark still reads at 16 px.
+
+  Canvas: 1024x1024; the squircle occupies the standard macOS icon grid
+  (824x824 at 100,100 — corner radius ~185). No shadow outside the squircle.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Dark violet ground: faint glow from the upper middle, palette darks. -->
+    <radialGradient id="ground" cx="0.5" cy="0.38" r="0.75">
+      <stop offset="0" stop-color="#241f38"/>
+      <stop offset="1" stop-color="#0b0a12"/>
+    </radialGradient>
+    <!-- Base ghost body: darker violet that reads as the "grout" between tiles. -->
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7561d1"/>
+      <stop offset="1" stop-color="#6247b8"/>
+    </linearGradient>
+    <!-- Head tile: the brightest violet, softly lit from the top. -->
+    <linearGradient id="head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bda9fc"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <!-- Spectral aura behind the ghost. -->
+    <radialGradient id="aura" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="squircle-clip">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <!-- Ghost silhouette: dome head, straight sides, four down-scallops. -->
+    <path id="ghost" d="M272,450 A240,240 0 0 1 752,450 L752,660
+      a60,60 0 0 1 -120,0 a60,60 0 0 1 -120,0
+      a60,60 0 0 1 -120,0 a60,60 0 0 1 -120,0 Z"/>
+    <clipPath id="ghost-clip"><use href="#ghost"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle-clip)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#ground)"/>
+    <ellipse cx="512" cy="470" rx="360" ry="330" fill="url(#aura)"/>
+
+    <use id="ghost-body" href="#ghost" fill="url(#body)"/>
+
+    <!-- Specter Map: treemap tiles across the lower body only — the head and
+         face stay solid. Vertical seams align with the scallop notches
+         (x = 392, 512, 632) so no foot is cut in half. The base body color
+         shows through the 10px gaps as the tile seams. -->
+    <g id="treemap" clip-path="url(#ghost-clip)">
+      <rect x="262" y="200" width="500" height="290" fill="url(#head)"/>
+      <rect x="262" y="500" width="240" height="100" fill="#c4b5fd"/>
+      <rect x="262" y="610" width="120" height="130" fill="#a78bfa"/>
+      <rect x="392" y="610" width="110" height="130" fill="#6ee7b7"/>
+      <rect x="512" y="500" width="250" height="70"  fill="#a78bfa"/>
+      <rect x="512" y="580" width="110" height="160" fill="#c4b5fd"/>
+      <rect x="632" y="580" width="130" height="160" fill="#a78bfa"/>
+    </g>
+
+    <!-- Friendly eyes. -->
+    <g id="eyes">
+      <ellipse cx="436" cy="420" rx="34" ry="50" fill="#141221"/>
+      <ellipse cx="588" cy="420" rx="34" ry="50" fill="#141221"/>
+    </g>
+  </g>
+</svg>
