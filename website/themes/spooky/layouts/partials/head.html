@@ -1,0 +1,21 @@
+{{- $mark := site.Params.logo_mark | default "👻" -}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if not .IsHome }}{{ .Title }} | {{ end }}{{ .Site.Title }}</title>
+<meta name="description" content="{{ with .Description }}{{ . }}{{ else }}{{ .Site.Params.description }}{{ end }}">
+{{- with .Site.Params.author }}
+<meta name="author" content="{{ . }}">
+{{- end }}
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ if not .IsHome }}{{ .Title }} | {{ end }}{{ .Site.Title }}">
+<meta property="og:description" content="{{ with .Description }}{{ . }}{{ else }}{{ .Site.Params.description }}{{ end }}">
+<meta property="og:url" content="{{ .Permalink }}">
+{{/* Emoji favicon as an inline data URI: no favicon file to ship and nothing
+     to fetch, which keeps the build fully offline. */}}
+<link rel="icon" href="{{ printf "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%s</text></svg>" $mark | safeURL }}">
+{{/* style.css is a Go template (it reads the palette out of site params), so it
+     is executed before fingerprinting. Fingerprinting means the URL changes
+     whenever the palette or the rules do, so a stale CDN or browser cache can
+     never pair new HTML with old CSS. */}}
+{{ $css := resources.Get "css/style.css" | resources.ExecuteAsTemplate "css/style.css" . | fingerprint }}
+<link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">

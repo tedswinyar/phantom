@@ -1,0 +1,20 @@
+{
+    "scanA": "e7ae86e2-308b-444c-8a3d-cd21467ab442",
+    "scanB": "0b54b774-19a1-4373-a423-77aa93e40e5b",
+    "scanAStartedAt": "2026-03-10T09:00:00.000000Z",
+    "scanBStartedAt": "2026-03-17T14:30:00.000000Z",
+    "reversedChronology": null,
+    "rootPath": "/Users/ghost/Code",
+    "diskDelta": -31457280,
+    "logicalDelta": -31457280,
+    "fileCountDelta": -12,
+    "dirCountDelta": 1,
+    "errorCountDelta": 0,
+    "grown": [
+        {"path": "/Users/ghost/Code/new-project", "before": null, "after": 8388608, "delta": 8388608}
+    ],
+    "freed": [
+        {"path": "/Users/ghost/Code", "before": 104857600, "after": 73400320, "delta": -31457280},
+        {"path": "/Users/ghost/Code/target", "before": 39845888, "after": null, "delta": -39845888}
+    ]
+}
