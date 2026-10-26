@@ -1,0 +1,24 @@
+{
+  "planId": "7d0f3a9c-2b41-4c8e-9f65-0a1b2c3d4e5f",
+  "beforeScanId": "e7ae86e2-308b-444c-8a3d-cd21467ab442",
+  "afterScanId": "0b54b774-19a1-4373-a423-77aa93e40e5b",
+  "rootPath": "/Users/ghost/Code",
+  "verifiedAt": "2026-03-17T15:20:00.000000Z",
+  "items": [
+    {
+      "ruleId": "cargo-target",
+      "label": "Rust target/ directories",
+      "paths": [
+        "/Users/ghost/Code/dormant/target"
+      ],
+      "expectedFreedBytes": 17179869184,
+      "actualFreedBytes": 17179869184,
+      "beforeBytes": 17179869184,
+      "afterBytes": 0
+    }
+  ],
+  "expectedFreedBytes": 17179869184,
+  "actualFreedBytes": 17180000000,
+  "shortfallBytes": -130816,
+  "withinTolerance": true
+}

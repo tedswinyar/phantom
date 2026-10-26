@@ -1,0 +1,129 @@
+{
+  "groups": [
+    {
+      "ruleId": "cargo-target",
+      "label": "Rust target/ directories",
+      "category": "staleProjectArtifact",
+      "hint": "`cargo clean` or delete; the next `cargo build` regenerates it",
+      "command": "cargo clean",
+      "riskTier": "safe",
+      "why": "Cargo build output beside a Cargo.toml; `cargo build` recreates it; a lockfile pins the dependency versions; the project's newest source edit and git activity are at least 90 days old.",
+      "rebuildCost": {
+        "kind": "compile",
+        "estimate": "re-compile ≈ 17.2 GB of build output"
+      },
+      "toolEstimate": null,
+      "diskSize": 17179869184,
+      "listedDiskSize": 17179869184,
+      "privateSize": 17179869184,
+      "logicalSize": 18179869184,
+      "fileCount": 5120,
+      "topPaths": [
+        "/Users/ghost/Code/dormant/target"
+      ]
+    },
+    {
+      "ruleId": "dot-cache",
+      "label": "~/.cache",
+      "category": "toolManagedCache",
+      "hint": "per-tool clean commands (`uv cache clean`, `pnpm store prune`); hardlinked stores free less than they list",
+      "command": null,
+      "riskTier": "caution",
+      "why": "the shared per-tool cache directory; each tool refetches its own entries.",
+      "rebuildCost": {
+        "kind": "download",
+        "estimate": "re-download ≈ 5.4 GB"
+      },
+      "toolEstimate": null,
+      "diskSize": 5368709120,
+      "listedDiskSize": 18253611008,
+      "privateSize": 1073741824,
+      "logicalSize": 18253611008,
+      "fileCount": 84211,
+      "topPaths": [
+        "/Users/ghost/.cache"
+      ]
+    },
+    {
+      "ruleId": "homebrew-cellar",
+      "label": "Homebrew Cellar",
+      "category": "toolManagedCache",
+      "hint": "`brew cleanup` / `brew uninstall`, not rm -rf",
+      "command": "brew cleanup",
+      "riskTier": "caution",
+      "why": "installed Homebrew formulae; `brew cleanup` drops superseded versions and `brew install` refetches.",
+      "rebuildCost": {
+        "kind": "download",
+        "estimate": "re-download ≈ 2.1 GB"
+      },
+      "toolEstimate": {
+        "tool": "brew",
+        "command": "brew cleanup -n",
+        "reclaimableBytes": 734003200,
+        "note": "superseded formula versions and downloads brew would remove; the Cellar itself stays"
+      },
+      "diskSize": 2147483648,
+      "listedDiskSize": 2147483648,
+      "privateSize": 2147483648,
+      "logicalSize": 2147483648,
+      "fileCount": 41200,
+      "topPaths": [
+        "/opt/homebrew/Cellar"
+      ]
+    },
+    {
+      "ruleId": "cloud-dataloaded",
+      "label": "Cloud-dataloaded placeholders",
+      "category": "cloudDataloaded",
+      "hint": "contents live in the cloud; local blocks are ~0 — deleting frees almost nothing",
+      "command": null,
+      "riskTier": "review",
+      "why": "a cloud placeholder whose contents are not local; deleting it frees almost no blocks.",
+      "rebuildCost": {
+        "kind": "none",
+        "estimate": "not applicable — nothing regenerates this"
+      },
+      "toolEstimate": null,
+      "diskSize": 147456,
+      "listedDiskSize": 147456,
+      "privateSize": 147456,
+      "logicalSize": 154140672,
+      "fileCount": 312,
+      "topPaths": [
+        "/Users/ghost/Library/CloudStorage/OneDrive/big.pptx"
+      ]
+    }
+  ],
+  "reclaimEstimate": 20401094656,
+  "reviewDiskSize": 0,
+  "cloudDataloadedLogicalSize": 154140672,
+  "cloudDataloadedDiskSize": 147456,
+  "projects": [
+    {
+      "root": "/Users/ghost/Code/dormant",
+      "lastActivityDays": 120,
+      "dormant": true,
+      "artifacts": [
+        {
+          "ruleId": "cargo-target",
+          "path": "/Users/ghost/Code/dormant/target",
+          "category": "staleProjectArtifact",
+          "riskTier": "safe",
+          "diskSize": 17179869184
+        }
+      ]
+    },
+    {
+      "root": "/Users/ghost/Code/phantom",
+      "lastActivityDays": 0,
+      "dormant": false,
+      "artifacts": []
+    },
+    {
+      "root": "/Users/ghost/Code/undated",
+      "lastActivityDays": null,
+      "dormant": false,
+      "artifacts": []
+    }
+  ]
+}

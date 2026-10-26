@@ -1,0 +1,6 @@
+# Fixture projects: every artifact directory the root .gitignore excludes is
+# deliberately present here (one per project type; docs/reclaimability.md).
+!target/
+!build/
+!dist/
+!.build/

@@ -1,0 +1,25 @@
+{
+  "path": "/Users/ghost/Code/dormant/target",
+  "isDir": true,
+  "diskSize": 17179869184,
+  "logicalSize": 18179869184,
+  "privateSize": 17179869184,
+  "sharedSize": 0,
+  "flags": [],
+  "dataless": false,
+  "cloneId": null,
+  "nlink": 1,
+  "category": "staleProjectArtifact",
+  "hotspot": {
+    "ruleId": "cargo-target",
+    "label": "Rust target/ directories",
+    "riskTier": "safe",
+    "why": "Cargo build output beside a Cargo.toml; `cargo build` recreates it; a lockfile pins the dependency versions; the project's newest source edit and git activity are at least 90 days old.",
+    "command": "cargo clean",
+    "hint": "`cargo clean` or delete; the next `cargo build` regenerates it",
+    "matchedBy": "topPath"
+  },
+  "unreadableBelow": [],
+  "unreadableBelowCount": 0,
+  "summary": "directory: 17.2 GB on disk (18.2 GB apparent); deleting frees 17.2 GB; classified staleProjectArtifact (safe): Cargo build output beside a Cargo.toml; `cargo build` recreates it; a lockfile pins the dependency versions; the project's newest source edit and git activity are at least 90 days old."
+}

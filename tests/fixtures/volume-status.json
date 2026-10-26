@@ -1,0 +1,33 @@
+{
+  "path": "/System/Volumes/Data",
+  "mountPoint": "/System/Volumes/Data",
+  "filesystem": "apfs",
+  "totalBytes": 994662584320,
+  "usedBytes": 771751936000,
+  "freeBytes": 222910648320,
+  "availableBytes": 209715200000,
+  "volumeUsedBytes": 740000000000,
+  "purgeableBytes": 5245800000,
+  "importantUsageBytes": 214961000000,
+  "opportunisticUsageBytes": 208000000000,
+  "snapshotCount": 3,
+  "snapshots": [
+    "com.apple.TimeMachine.2026-09-07-220000.local",
+    "com.apple.TimeMachine.2026-09-08-090000.local",
+    "com.apple.TimeMachine.2026-09-08-100000.local"
+  ],
+  "hidden": {
+    "scanId": "5e3c1a2b-8d4f-4c6e-9a1b-2f3d4e5f6a7b",
+    "scanRootPath": "/Users/ted",
+    "scannedBytes": 512000000000,
+    "unscannedBytes": 228000000000,
+    "otherVolumesBytes": 31751936000,
+    "otherUserHomes": [
+      { "path": "/Users/guest", "readable": true },
+      { "path": "/Users/other", "readable": false }
+    ],
+    "unreadableCount": 7,
+    "snapshotSuggestion": "tmutil thinlocalsnapshots /System/Volumes/Data 5245800000 4  # asks Time Machine to thin local snapshots until 5245800000 bytes are freed (urgency 4 = most aggressive); replace the byte count with what you want back. Phantom never runs this — run it yourself, then re-check the volume."
+  },
+  "note": "availableBytes is what an unprivileged process can still write; Finder's 'Available' is importantUsageBytes, which silently adds purgeableBytes (space macOS may reclaim on its own, local Time Machine snapshots included — freed space pinned by a snapshot returns only when it expires; ask with snapshots: true and hidden.snapshotSuggestion names the tmutil command, which Phantom never runs). usedBytes is the whole APFS container; volumeUsedBytes is this volume alone; hidden.otherVolumesBytes is the difference. Name a completed scanId for hidden.unscannedBytes = volumeUsedBytes − scannedBytes. On APFS, `df /` reports the sealed system snapshot — this reads the data volume."
+}

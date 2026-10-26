@@ -1,0 +1,24 @@
+{
+  "scanId": "e7ae86e2-308b-444c-8a3d-cd21467ab442",
+  "rootPath": "/Users/ghost/Code",
+  "thresholdDays": 90,
+  "projectsEvaluated": 3,
+  "unverifiable": 1,
+  "projects": [
+    {
+      "root": "/Users/ghost/Code/dormant",
+      "lastActivityDays": 120,
+      "artifactDiskSize": 17179869184,
+      "artifacts": [
+        {
+          "ruleId": "cargo-target",
+          "path": "/Users/ghost/Code/dormant/target",
+          "category": "staleProjectArtifact",
+          "riskTier": "safe",
+          "diskSize": 17179869184
+        }
+      ]
+    }
+  ],
+  "artifactDiskSize": 17179869184
+}

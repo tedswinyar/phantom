@@ -1,0 +1,19 @@
+<footer>
+  {{ with site.Menus.footer }}
+  <ul class="footer-nav">
+    {{ range . }}
+    <li><a href="{{ .URL | relURL }}">{{ .Name }}</a></li>
+    {{ end }}
+  </ul>
+  {{ else }}
+  {{/* No dedicated footer menu configured: reuse the main nav so the footer is
+       never empty on a freshly stamped site. */}}
+  <ul class="footer-nav">
+    {{ range site.Menus.main }}
+    <li><a href="{{ .URL | relURL }}">{{ .Name }}</a></li>
+    {{ end }}
+  </ul>
+  {{ end }}
+  {{ with site.Params.footer_note }}<p class="footer-note">{{ . }}</p>{{ end }}
+  <p class="footer-copy">{{ with site.Params.author }}Made by {{ . }}. {{ end }}{{ site.Params.footer_copy | default "" }}</p>
+</footer>

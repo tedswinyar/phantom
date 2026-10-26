@@ -1,0 +1,2136 @@
+// Integration tests for the async scan lifecycle: boot the real router on an
+// ephemeral port with a temp database and drive it over real HTTP — the same
+// surface the CLI, MCP server, Swift app, and OPE conformance harness hit.
+//
+// Determinism: `AppState::scan_hold` parks every scan worker BEFORE its walk
+// until the test calls `notify_one()`, so cancel/list/delete can be ordered
+// against a scan that is provably still running — no sleeps, no races.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use phantom_api::{AppState, build_router, config::Retention, scans::finish_scan};
+use phantom_core::{Scan, ScanEntry, ScanOutcome, ScanStore};
+use uuid::Uuid;
+
+const KEY: &str = "test-key-not-secret";
+const MIB: u64 = 1024 * 1024;
+
+struct TestServer {
+    base: String,
+    client: reqwest::Client,
+    state: AppState,
+    db: PathBuf,
+    dir: tempfile::TempDir,
+}
+
+impl TestServer {
+    async fn start() -> Self {
+        Self::boot(false).await
+    }
+
+    /// A server whose scan workers park before walking until
+    /// `self.release_scan()` is called.
+    async fn start_held() -> Self {
+        Self::boot(true).await
+    }
+
+    async fn boot(held: bool) -> Self {
+        Self::boot_with(held, Retention::default()).await
+    }
+
+    /// A server with an operator's retention (the env-resolved shape
+    /// main.rs passes), for the budget tests.
+    async fn start_with_retention(retention: Retention) -> Self {
+        Self::boot_with(false, retention).await
+    }
+
+    async fn boot_with(held: bool, retention: Retention) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("phantom.db");
+        let mut state = AppState::with_retention(ScanStore::open(&db).unwrap(), KEY.into(), retention);
+        if held {
+            state.scan_hold = Some(Arc::new(tokio::sync::Notify::new()));
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router_state = state.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, build_router(router_state)).await.unwrap();
+        });
+        Self {
+            base,
+            client: reqwest::Client::new(),
+            state,
+            db,
+            dir,
+        }
+    }
+
+    fn release_scan(&self) {
+        self.state
+            .scan_hold
+            .as_ref()
+            .expect("server was not started with a hold")
+            .notify_one();
+    }
+
+    async fn post(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .header("x-api-key", KEY)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn post_empty(&self, path: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .header("x-api-key", KEY)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn get(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}{path}", self.base))
+            .header("x-api-key", KEY)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn delete(&self, path: &str) -> reqwest::Response {
+        self.client
+            .delete(format!("{}{path}", self.base))
+            .header("x-api-key", KEY)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Build the deterministic fixture tree and return its root path.
+    ///
+    ///   root/big.bin        1 MiB   → exactly ON the persistence boundary
+    ///   root/small.txt      10 B    → below it (row filtered, bytes counted)
+    ///   root/sub/medium.log 2 MiB   → above it
+    ///   root/sub/tiny.rs    100 B   → below it
+    ///   root/empty/                 → empty dir: counted, NOT persisted (1.1.1 —
+    ///                                 directory rows obey the 1 MiB rule too)
+    fn build_fixture_tree(&self) -> String {
+        let root = self.dir.path().join("fixture");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("big.bin"), vec![7u8; MIB as usize]).unwrap();
+        std::fs::write(root.join("small.txt"), b"tiny bytes").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/medium.log"), vec![9u8; 2 * MIB as usize]).unwrap();
+        std::fs::write(root.join("sub/tiny.rs"), vec![1u8; 100]).unwrap();
+        std::fs::create_dir(root.join("empty")).unwrap();
+        root.display().to_string()
+    }
+
+    /// POST /scans for `root`, asserting the 202 contract; returns the id.
+    async fn start_scan(&self, root: &str) -> String {
+        let resp = self
+            .post("/scans", serde_json::json!({ "rootPath": root }))
+            .await;
+        assert_eq!(resp.status(), 202, "POST /scans answers 202 immediately");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(v["status"], "running");
+        assert!(v["finishedAt"].is_null());
+        assert!(
+            v["progress"]["filesSeen"].is_u64(),
+            "202 body carries live progress: {v}"
+        );
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// Poll GET /scans/{id} until the status is terminal.
+    async fn poll_terminal(&self, id: &str) -> serde_json::Value {
+        for _ in 0..1000 {
+            let v: serde_json::Value = self
+                .get(&format!("/scans/{id}"))
+                .await
+                .json()
+                .await
+                .unwrap();
+            if v["status"] != "running" {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("scan {id} never reached a terminal status");
+    }
+
+    /// Scan the fixture tree end-to-end; returns (root, id, terminal view).
+    async fn scan_fixture(&self) -> (String, String, serde_json::Value) {
+        let root = self.build_fixture_tree();
+        let id = self.start_scan(&root).await;
+        let done = self.poll_terminal(&id).await;
+        assert_eq!(done["status"], "complete");
+        (root, id, done)
+    }
+}
+
+// --- Lifecycle ---------------------------------------------------------------
+
+#[tokio::test]
+async fn scan_lifecycle_end_to_end() {
+    let s = TestServer::start().await;
+    let (_root, id, done) = s.scan_fixture().await;
+
+    // Full wire contract on the terminal view: camelCase keys, nullable
+    // fields present (progress goes null once terminal).
+    let obj = done.as_object().unwrap();
+    for key in [
+        "id", "rootPath", "status", "startedAt", "finishedAt", "totalDiskSize",
+        "totalLogicalSize", "fileCount", "dirCount", "errorCount", "progress",
+    ] {
+        assert!(obj.contains_key(key), "missing wire key {key}");
+    }
+    assert!(obj["progress"].is_null(), "terminal scans carry progress: null");
+    let finished = obj["finishedAt"].as_str().unwrap();
+    assert!(
+        finished.len() == 27 && finished.ends_with('Z') && finished.contains('.'),
+        "finishedAt not canonical: {finished}"
+    );
+    assert_eq!(obj["id"].as_str().unwrap(), id);
+
+    // Totals come from the FULL walk (small files count).
+    assert_eq!(obj["fileCount"], 4);
+    assert_eq!(obj["dirCount"], 3, "root + sub + empty");
+    assert_eq!(obj["errorCount"], 0);
+    let total = obj["totalDiskSize"].as_u64().unwrap();
+    assert!(total >= 3 * MIB, "all four files' disk bytes: {total}");
+    assert_eq!(total % 512, 0, "disk bytes are whole 512-byte blocks");
+    assert!(obj["totalLogicalSize"].as_u64().unwrap() >= 3 * MIB + 110);
+}
+
+#[tokio::test]
+async fn persistence_keeps_dirs_and_big_files_and_folds_the_rest_into_totals() {
+    let s = TestServer::start().await;
+    let (root, id, done) = s.scan_fixture().await;
+
+    // Files at/above 1 MiB survive as rows; below-threshold rows are gone.
+    let files: serde_json::Value = s
+        .get(&format!("/scans/{id}/files"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["medium.log", "big.bin"],
+        "size-desc; big.bin sits exactly ON the inclusive 1 MiB boundary"
+    );
+
+    // The filtered small files still count: the persisted root directory's
+    // aggregate equals the scan's full-walk total, byte for byte.
+    let entry: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(entry["isDir"], true);
+    assert_eq!(entry["parentPath"], serde_json::Value::Null);
+    assert_eq!(entry["diskSize"], done["totalDiskSize"]);
+    assert_eq!(entry["logicalSize"], done["totalLogicalSize"]);
+
+    // Descendant counts, aggregated over the FULL walk like the sizes —
+    // mutation-proof: count from persisted rows instead and the root shows
+    // 2 files (small.txt/tiny.rs vanish); swap the tallies and it shows
+    // (2, 4). dirCount excludes the entry itself.
+    assert_eq!(entry["fileCount"], 4, "filtered small files still count");
+    assert_eq!(entry["dirCount"], 2, "sub + empty; self excluded — empty/ counts without a row");
+    let resp = s.get(&format!("/scans/{id}/entry?path={root}/empty")).await;
+    assert_eq!(resp.status(), 404, "a 0-byte directory has no row of its own (1.1.1)");
+    let sub: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/sub"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sub["fileCount"], 2);
+    assert_eq!(sub["dirCount"], 0);
+    // File rows carry the counts present-as-null, never absent.
+    let file_row: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/big.bin"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    for key in ["fileCount", "dirCount"] {
+        assert!(file_row.as_object().unwrap().contains_key(key), "missing {key}");
+        assert!(file_row[key].is_null(), "{key} must be null on a file row");
+    }
+}
+
+#[tokio::test]
+async fn types_route_serves_full_walk_totals_largest_first() {
+    let s = TestServer::start().await;
+    let (_root, id, _done) = s.scan_fixture().await;
+
+    // txt/rs come from files whose ROWS were filtered out at persistence —
+    // mutation-proof: compute the totals after the filter in finish_scan and
+    // those two vanish.
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/types"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let items = v.as_array().unwrap();
+
+    // Wire shape: camelCase keys, nullable fileType present-as-null capable.
+    for key in ["fileType", "diskSize", "fileCount"] {
+        assert!(items[0].as_object().unwrap().contains_key(key), "missing {key}");
+    }
+
+    // Order is part of the contract: largest disk footprint first, type-name
+    // tiebreak — mutation-proof: drop the ORDER BY in
+    // `ScanStore::file_type_totals` and this exact sequence fails.
+    let types: Vec<&str> = items
+        .iter()
+        .map(|t| t["fileType"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        vec!["log", "bin", "rs", "txt"],
+        "log (2 MiB) > bin (1 MiB) > rs (100 B) vs txt (10 B): disk-desc"
+    );
+    for t in items {
+        assert_eq!(t["fileCount"], 1);
+    }
+    let by_type: std::collections::HashMap<&str, u64> = items
+        .iter()
+        .map(|t| (t["fileType"].as_str().unwrap(), t["diskSize"].as_u64().unwrap()))
+        .collect();
+    assert!(by_type["txt"] > 0, "filtered small file still totalled");
+    assert!(by_type["rs"] > 0, "filtered small file still totalled");
+}
+
+#[tokio::test]
+async fn types_route_error_branches() {
+    let s = TestServer::start_held().await;
+
+    // Unknown scan → 404; malformed uuid → 400, error-shaped.
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/types")
+        .await;
+    assert_eq!(resp.status(), 404);
+    let resp = s.get("/scans/not-a-uuid/types").await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].is_string(), "rejection must be error-shaped: {v}");
+
+    // Running scan → 409 pointing back at the progress surface —
+    // mutation-proof: drop the `persisted_scan` gate in `get_types` and this
+    // returns 200 with an empty array instead.
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+    let resp = s.get(&format!("/scans/{id}/types")).await;
+    assert_eq!(resp.status(), 409);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("still running"));
+
+    s.release_scan();
+    s.poll_terminal(&id).await;
+}
+
+// --- Retention -----------------------------------------------------------------
+
+/// Completing a scan prunes the ROOT's collection to the newest
+/// KEEP_LAST_SCANS (phantom-9tt: per root, then a total cap). 25 synthetic
+/// older scans of the fixture root + 1 real completion = 26 of that root →
+/// the OLDEST synthetic is pruned, its entries cascading with it; a scan of
+/// an unrelated root seeded older than all of them SURVIVES (it is its own
+/// root's only scan). Mutation-proof: remove the prune call from
+/// finish_scan and the list stays at 27 with the oldest scan still present;
+/// prune by total only (the pre-9tt rule) and the unrelated root's scan is
+/// the one that disappears.
+#[tokio::test]
+async fn completion_prunes_to_the_newest_keep_last_scans() {
+    use phantom_api::scans::KEEP_LAST_SCANS;
+
+    let s = TestServer::start().await;
+    let root = s.build_fixture_tree();
+    let root_str = root.clone();
+
+    // An unrelated root's lone scan, older than everything else.
+    let mut other = Scan::new("/elsewhere".to_string());
+    other.status = phantom_core::ScanStatus::Complete;
+    other.started_at = chrono::Utc::now() - chrono::Duration::days(30);
+    other.finished_at = Some(other.started_at);
+    s.state.scan_store().insert_scan(&other, &[], &[], None).unwrap();
+
+    // Seed KEEP_LAST_SCANS synthetic scans OF THE FIXTURE ROOT, all older
+    // than "now", oldest first; the oldest carries an entry so the cascade
+    // is observable.
+    let mut oldest_id = None;
+    for i in 0..KEEP_LAST_SCANS {
+        let mut scan = Scan::new(root_str.clone());
+        scan.status = phantom_core::ScanStatus::Complete;
+        scan.started_at = chrono::Utc::now() - chrono::Duration::minutes((KEEP_LAST_SCANS - i) as i64);
+        scan.finished_at = Some(scan.started_at);
+        let entries = if i == 0 {
+            oldest_id = Some(scan.id);
+            vec![ScanEntry {
+                path: "/synthetic/0".into(),
+                parent_path: None,
+                name: "0".into(),
+                is_dir: true,
+                disk_size: 0,
+                logical_size: 0,
+                modified_at: None,
+                file_type: None,
+                category: None,
+                nlink: 1,
+                dev: 0,
+                ino: 0,
+                file_count: Some(0),
+                dir_count: Some(0),
+                private_size: None,
+                shared_size: None,
+                clone_id: None,
+                flags: None,
+            }]
+        } else {
+            Vec::new()
+        };
+        s.state
+            .scan_store()
+            .insert_scan(&scan, &entries, &[], None)
+            .unwrap();
+    }
+    let oldest_id = oldest_id.unwrap();
+
+    // One real completion of the SAME root pushes that root to
+    // KEEP_LAST_SCANS + 1; the completion path must prune it back down and
+    // leave the other root alone.
+    let new_id = s.start_scan(&root).await;
+    s.poll_terminal(&new_id).await;
+
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let items = list.as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        KEEP_LAST_SCANS + 1,
+        "the root keeps its newest {KEEP_LAST_SCANS}; the other root keeps its one"
+    );
+    assert!(
+        !items.iter().any(|v| v["id"] == oldest_id.to_string()),
+        "the root's oldest scan must be the one pruned"
+    );
+    assert!(
+        items.iter().any(|v| v["id"] == other.id.to_string()),
+        "another root's scan is never evicted by this root's history"
+    );
+    // Its entries cascaded with it — not orphaned in the entries table.
+    let store = &s.state;
+    let orphans = store.scan_store().entries(oldest_id);
+    assert!(orphans.is_err(), "pruned scan must be NotFound, entries cascaded");
+}
+
+/// The byte budget, over the wire (phantom-cnr.3): with a budget nothing can
+/// satisfy, completing a scan evicts the globally oldest scan of a root
+/// that holds more than the floor of two completed scans — and NOTHING
+/// else. Three synthetic scans of another root, each carrying rows, plus
+/// one real completion: the other root's oldest goes, its two newer scans
+/// stand (the floor), the fresh scan stands (its root holds one). The count
+/// caps are at their defaults, so only the budget can explain the eviction.
+/// Mutation-proof: bypass the budget in finish_scan (call prune_retention)
+/// and all four scans remain; drop the floor and the other root empties.
+#[tokio::test]
+async fn completion_evicts_the_oldest_scan_above_the_floor_when_over_budget() {
+    let retention = Retention { budget_bytes: 1, ..Retention::default() };
+    let s = TestServer::start_with_retention(retention).await;
+    let root = s.build_fixture_tree();
+
+    let mut other_ids = Vec::new();
+    for i in 0..3u32 {
+        let mut scan = Scan::new("/elsewhere".to_string());
+        scan.status = phantom_core::ScanStatus::Complete;
+        scan.started_at = chrono::Utc::now() - chrono::Duration::days(30 - i as i64);
+        scan.finished_at = Some(scan.started_at);
+        scan.file_count = 20;
+        scan.dir_count = 1;
+        let entries: Vec<ScanEntry> = (0..20)
+            .map(|n| ScanEntry {
+                path: format!("/elsewhere/{i}/file-{n}"),
+                parent_path: Some("/elsewhere".into()),
+                name: format!("file-{n}"),
+                is_dir: false,
+                disk_size: MIB,
+                logical_size: MIB,
+                modified_at: None,
+                file_type: Some("bin".into()),
+                category: None,
+                nlink: 1,
+                dev: 1,
+                ino: 1000 + n,
+                file_count: None,
+                dir_count: None,
+                private_size: None,
+                shared_size: None,
+                clone_id: None,
+                flags: None,
+            })
+            .collect();
+        s.state.scan_store().insert_scan(&scan, &entries, &[], None).unwrap();
+        other_ids.push(scan.id);
+    }
+
+    let new_id = s.start_scan(&root).await;
+    let done = s.poll_terminal(&new_id).await;
+    assert_eq!(done["status"], "complete");
+
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let listed: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![new_id.clone(), other_ids[2].to_string(), other_ids[1].to_string()],
+        "the other root keeps its newest two (the floor); its oldest is the one eviction"
+    );
+    assert_eq!(
+        s.get(&format!("/scans/{}", other_ids[0])).await.status(),
+        404,
+        "the evicted id is a clean 404"
+    );
+}
+
+/// The floor's age clause, over the wire (phantom-ccq): a root whose newest
+/// completed scan is older than 30 days is not protected, so with a budget
+/// nothing can satisfy, completing a scan evicts that root's whole history
+/// while a root scanned this week keeps its pair — and the completion log
+/// names the waived root and its age. Mutation-proof: drop the age clause
+/// in the store and the stale pair stands (and no waiver line is written);
+/// drop the waiver log in `log_prune` and the log assertion fails.
+#[tokio::test]
+async fn completion_evicts_a_stale_roots_history_and_logs_the_waived_floor() {
+    let logs = logs::capture();
+    let retention = Retention { budget_bytes: 1, ..Retention::default() };
+    let s = TestServer::start_with_retention(retention).await;
+    let root = s.build_fixture_tree();
+
+    let synthetic = |root: &str, days_ago: i64| {
+        let mut scan = Scan::new(root.to_string());
+        scan.status = phantom_core::ScanStatus::Complete;
+        scan.started_at = chrono::Utc::now() - chrono::Duration::days(days_ago);
+        scan.finished_at = Some(scan.started_at);
+        scan.file_count = 20;
+        scan.dir_count = 1;
+        let entries: Vec<ScanEntry> = (0..20)
+            .map(|n| ScanEntry {
+                path: format!("{root}/{days_ago}/file-{n}"),
+                parent_path: Some(root.into()),
+                name: format!("file-{n}"),
+                is_dir: false,
+                disk_size: MIB,
+                logical_size: MIB,
+                modified_at: None,
+                file_type: Some("bin".into()),
+                category: None,
+                nlink: 1,
+                dev: 1,
+                ino: 1000 + n,
+                file_count: None,
+                dir_count: None,
+                private_size: None,
+                shared_size: None,
+                clone_id: None,
+                flags: None,
+            })
+            .collect();
+        s.state.scan_store().insert_scan(&scan, &entries, &[], None).unwrap();
+        scan.id
+    };
+    // /stale: newest scan 45 days ago. /fresh: newest 3 days ago.
+    let stale = [synthetic("/stale", 61), synthetic("/stale", 45)];
+    let fresh = [synthetic("/fresh", 5), synthetic("/fresh", 3)];
+
+    let new_id = s.start_scan(&root).await;
+    let done = s.poll_terminal(&new_id).await;
+    assert_eq!(done["status"], "complete");
+
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let listed: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![new_id.clone(), fresh[1].to_string(), fresh[0].to_string()],
+        "the stale root's pair went; the fresh root's pair and the new scan stand"
+    );
+    for id in stale {
+        assert_eq!(s.get(&format!("/scans/{id}")).await.status(), 404, "evicted {id} is a clean 404");
+    }
+
+    let text = logs.text();
+    let waived = text
+        .lines()
+        .find(|l| l.contains("retention: floor waived") && l.contains(&new_id))
+        .unwrap_or_else(|| panic!("no waiver line for {new_id}:\n{text}"));
+    for needle in ["root=/stale", "age_days=45", "45 days old (older than 30 days)"] {
+        assert!(waived.contains(needle), "{needle:?} missing from: {waived}");
+    }
+    assert!(
+        !text.lines().any(|l| l.contains("retention: floor waived") && l.contains("/fresh")),
+        "the fresh root's floor was never waived:\n{text}"
+    );
+}
+
+// --- Hotspots (Phase 5) --------------------------------------------------------
+
+impl TestServer {
+    /// A tree with one hotspot: node_modules holding a file on each side of
+    /// the ADR-0005 persistence boundary, plus an ordinary file outside it.
+    ///
+    ///   root/node_modules/chunk.bin 1 MiB  → persisted, categorized
+    ///   root/node_modules/tiny.js   10 B   → row filtered; the classifier
+    ///                                        still counts it (full walk)
+    ///   root/plain.bin              1 MiB  → persisted, NO category
+    fn build_hotspot_tree(&self) -> String {
+        let root = self.dir.path().join("hot");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules/chunk.bin"), vec![3u8; MIB as usize]).unwrap();
+        std::fs::write(root.join("node_modules/tiny.js"), b"tiny bytes").unwrap();
+        std::fs::write(root.join("plain.bin"), vec![4u8; MIB as usize]).unwrap();
+        root.display().to_string()
+    }
+}
+
+#[tokio::test]
+async fn hotspots_classify_on_completion_and_persist_categories() {
+    let s = TestServer::start().await;
+    let root = s.build_hotspot_tree();
+    let id = s.start_scan(&root).await;
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "complete");
+
+    // The summary, over the wire: camelCase at every depth, one group.
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/hotspots"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let obj = v.as_object().unwrap();
+    for key in [
+        "groups",
+        "reclaimEstimate",
+        "reviewDiskSize",
+        "cloudDataloadedLogicalSize",
+        "cloudDataloadedDiskSize",
+    ] {
+        assert!(obj.contains_key(key), "summary missing wire key {key}");
+    }
+    let groups = v["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "exactly the node_modules group: {v}");
+    let g = &groups[0];
+    assert_eq!(g["ruleId"], "node-modules");
+    assert_eq!(g["category"], "regenerableArtifact");
+    // command is first-class and HONEST: node_modules' only cleanup is
+    // deleting the directory, so it carries null, present-as-null.
+    assert!(g.as_object().unwrap().contains_key("command"));
+    assert!(g["command"].is_null(), "node-modules must not offer a command: {g}");
+    assert_eq!(
+        g["topPaths"],
+        serde_json::json!([format!("{root}/node_modules")])
+    );
+    // Full-walk classification: tiny.js has no persisted row, yet it counts
+    // here — mutation-proof: classify AFTER persistable_entries in
+    // finish_scan and fileCount drops to 1 / diskSize to exactly 1 MiB.
+    assert_eq!(g["fileCount"], 2, "the filtered small file still counts");
+    let group_disk = g["diskSize"].as_u64().unwrap();
+    assert!(group_disk > MIB, "tiny.js blocks must be in the total: {group_disk}");
+    assert_eq!(v["reclaimEstimate"].as_u64().unwrap(), group_disk);
+    assert_eq!(v["reviewDiskSize"], 0);
+    assert_eq!(v["cloudDataloadedLogicalSize"], 0);
+    assert_eq!(v["cloudDataloadedDiskSize"], 0);
+
+    // Categories persisted on the entry rows — the DIR row included (lead
+    // decision: dir rows under hotspot roots get categories at persist time).
+    let dir_row: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/node_modules"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dir_row["isDir"], true);
+    assert_eq!(dir_row["category"], "regenerableArtifact");
+    let file_row: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/node_modules/chunk.bin"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(file_row["category"], "regenerableArtifact");
+
+    // Ordinary content stays uncategorized — present-as-null, never absent.
+    let plain: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/plain.bin"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(plain.as_object().unwrap().contains_key("category"));
+    assert!(plain["category"].is_null());
+}
+
+#[tokio::test]
+async fn hotspots_of_a_scan_with_no_hotspots_is_the_empty_summary() {
+    let s = TestServer::start().await;
+    let (_root, id, _done) = s.scan_fixture().await;
+
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/hotspots"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["groups"], serde_json::json!([]));
+    assert_eq!(v["reclaimEstimate"], 0);
+    assert_eq!(v["reviewDiskSize"], 0);
+    assert_eq!(v["cloudDataloadedLogicalSize"], 0);
+    assert_eq!(v["cloudDataloadedDiskSize"], 0);
+}
+
+#[tokio::test]
+async fn hotspots_error_branches() {
+    let s = TestServer::start_held().await;
+
+    // Unknown scan → 404; malformed uuid → 400, error-shaped.
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/hotspots")
+        .await;
+    assert_eq!(resp.status(), 404);
+    let resp = s.get("/scans/not-a-uuid/hotspots").await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].is_string(), "rejection must be error-shaped: {v}");
+
+    // Running scan → 409, matching the /types semantics — mutation-proof:
+    // drop the `persisted_scan` gate in `get_hotspots` and this returns 200.
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+    let resp = s.get(&format!("/scans/{id}/hotspots")).await;
+    assert_eq!(resp.status(), 409);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("still running"));
+
+    s.release_scan();
+    s.poll_terminal(&id).await;
+}
+
+// --- Cancel ------------------------------------------------------------------
+
+#[tokio::test]
+async fn cancel_mid_scan_is_deterministic_and_discards_partial_results() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+
+    // The worker is parked pre-walk: the scan is running, verifiably.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}")).await.json().await.unwrap();
+    assert_eq!(v["status"], "running");
+
+    // Results are not readable while running — 409, not 404 or empty.
+    let resp = s.get(&format!("/scans/{id}/files")).await;
+    assert_eq!(resp.status(), 409);
+    let e: serde_json::Value = resp.json().await.unwrap();
+    assert!(e["error"].as_str().unwrap().contains("still running"));
+
+    let resp = s.post_empty(&format!("/scans/{id}/cancel")).await;
+    assert_eq!(resp.status(), 202);
+
+    // Release the walk; it sees the flag at its first entry and bails.
+    s.release_scan();
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "cancelled");
+    assert!(done["finishedAt"].is_string());
+    assert!(done["progress"].is_null());
+
+    // Partial results DISCARDED: the metadata row records the attempt, the
+    // result surfaces are empty.
+    assert_eq!(done["fileCount"], 0);
+    assert_eq!(done["totalDiskSize"], 0);
+    let files: serde_json::Value = s
+        .get(&format!("/scans/{id}/files"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(files.as_array().unwrap().len(), 0);
+    let tree: serde_json::Value = s
+        .get(&format!("/scans/{id}/tree"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tree.as_array().unwrap().len(), 0);
+    // No stored summary either: the honest empty summary, same posture.
+    let hs: serde_json::Value = s
+        .get(&format!("/scans/{id}/hotspots"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hs["groups"], serde_json::json!([]));
+    assert_eq!(hs["reclaimEstimate"], 0);
+
+    // Cancelling a terminal scan is a conflict, not a no-op.
+    let resp = s.post_empty(&format!("/scans/{id}/cancel")).await;
+    assert_eq!(resp.status(), 409);
+    let e: serde_json::Value = resp.json().await.unwrap();
+    assert!(e["error"].as_str().unwrap().contains("cancelled"));
+}
+
+#[tokio::test]
+async fn cancel_error_branches() {
+    let s = TestServer::start().await;
+
+    let resp = s
+        .post_empty("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/cancel")
+        .await;
+    assert_eq!(resp.status(), 404);
+
+    let resp = s.post_empty("/scans/not-a-uuid/cancel").await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].is_string(), "rejection must be error-shaped: {v}");
+
+    // Cancel after completion → 409 naming the terminal status.
+    let (_root, id, _done) = s.scan_fixture().await;
+    let resp = s.post_empty(&format!("/scans/{id}/cancel")).await;
+    assert_eq!(resp.status(), 409);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("complete"));
+}
+
+// --- The registry↔SQLite handoff --------------------------------------------
+
+#[tokio::test]
+async fn list_merges_in_flight_and_persisted_exactly_once() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+
+    // One persisted scan…
+    let done_id = s.start_scan(&root).await;
+    s.release_scan();
+    s.poll_terminal(&done_id).await;
+    tokio::time::sleep(Duration::from_millis(3)).await; // distinct startedAt
+
+    // …and one deterministically in flight.
+    let running_id = s.start_scan(&root).await;
+
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let items = list.as_array().unwrap();
+    assert_eq!(items.len(), 2, "one persisted + one in-flight, no doubles");
+    assert_eq!(items[0]["id"].as_str().unwrap(), running_id, "newest first");
+    assert_eq!(items[0]["status"], "running");
+    assert!(items[0]["progress"].is_object());
+    assert_eq!(items[1]["id"].as_str().unwrap(), done_id);
+    assert_eq!(items[1]["status"], "complete");
+    assert!(items[1]["progress"].is_null());
+
+    // After completion the same scan appears once, from the DB side.
+    s.release_scan();
+    s.poll_terminal(&running_id).await;
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![running_id.as_str(), done_id.as_str()]);
+    assert!(
+        list.as_array().unwrap().iter().all(|v| v["status"] == "complete"),
+        "handed off: {list}"
+    );
+    assert!(
+        s.state.registry.snapshot(Uuid::parse_str(&running_id).unwrap()).is_none(),
+        "after the handoff the registry side is released (never double-held)"
+    );
+}
+
+/// THE ordering test (persist first, release the registry second). The walk
+/// outcome is crafted so the DB insert FAILS (duplicate entry paths violate
+/// UNIQUE(scan_id, path) and roll the whole insert back). Correct ordering
+/// leaves the scan visible in the registry as `failed`; the reverted
+/// ordering (remove, then insert) leaves it in NEITHER place and the GET
+/// below 404s. Revert the order in `finish_scan` to watch this fail.
+#[tokio::test]
+async fn handoff_failure_keeps_the_scan_visible() {
+    let s = TestServer::start().await;
+    let scan = Scan::new("/synthetic");
+    let id = scan.id;
+    s.state.registry.register(scan);
+
+    let dup = ScanEntry {
+        path: "/synthetic".into(),
+        parent_path: None,
+        name: "synthetic".into(),
+        is_dir: true,
+        disk_size: 0,
+        logical_size: 0,
+        modified_at: None,
+        file_type: None,
+        category: None,
+        nlink: 1,
+        dev: 0,
+        ino: 0,
+        file_count: None,
+        dir_count: None,
+        private_size: None,
+        shared_size: None,
+        clone_id: None,
+        flags: None,
+    };
+    let outcome = ScanOutcome {
+        entries: vec![dup.clone(), dup],
+        total_disk_size: 0,
+        total_logical_size: 0,
+        file_count: 0,
+        dir_count: 1,
+        error_count: 0,
+        unreadable: Vec::new(),
+        shares: phantom_core::ShareLedger::new(),
+    };
+    finish_scan(&s.state, id, Ok(outcome));
+
+    let resp = s.get(&format!("/scans/{id}")).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "a scan whose persist failed must stay visible, never vanish"
+    );
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["status"], "failed");
+
+    // Defined delete semantics for the registry-only terminal residue.
+    let resp = s.delete(&format!("/scans/{id}")).await;
+    assert_eq!(resp.status(), 204);
+    assert_eq!(s.get(&format!("/scans/{id}")).await.status(), 404);
+}
+
+// --- Delete ------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_scan_cascades_and_running_scans_refuse() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+
+    // In-flight: deletion is refused until cancelled (defined semantics).
+    let running_id = s.start_scan(&root).await;
+    let resp = s.delete(&format!("/scans/{running_id}")).await;
+    assert_eq!(resp.status(), 409);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("cancel"));
+
+    s.release_scan();
+    let done = s.poll_terminal(&running_id).await;
+    assert_eq!(done["status"], "complete");
+
+    // Terminal: delete cascades; every result surface 404s afterwards.
+    let resp = s.delete(&format!("/scans/{running_id}")).await;
+    assert_eq!(resp.status(), 204);
+    assert_eq!(s.get(&format!("/scans/{running_id}")).await.status(), 404);
+    assert_eq!(
+        s.get(&format!("/scans/{running_id}/files")).await.status(),
+        404
+    );
+    let store = ScanStore::open(&s.db).unwrap();
+    let orphan_check = store.entries(Uuid::parse_str(&running_id).unwrap());
+    assert!(orphan_check.is_err(), "entries cascade with the scan row");
+
+    // Unknown id → 404.
+    let resp = s
+        .delete("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442")
+        .await;
+    assert_eq!(resp.status(), 404);
+}
+
+// --- Treemap -----------------------------------------------------------------
+
+#[tokio::test]
+async fn treemap_lays_out_at_view_size_and_reroots() {
+    let s = TestServer::start().await;
+    let (root, id, _done) = s.scan_fixture().await;
+
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/treemap?width=400&height=300"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["rootPath"].as_str().unwrap(), root);
+    let rects = v["rects"].as_array().unwrap();
+    let root_rect = &rects[0];
+    assert_eq!(root_rect["x"], 0.0);
+    assert_eq!(root_rect["y"], 0.0);
+    assert_eq!(root_rect["width"], 400.0);
+    assert_eq!(root_rect["height"], 300.0);
+    let names: Vec<&str> = rects.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"big.bin"));
+    assert!(names.contains(&"medium.log"));
+    assert!(
+        !names.contains(&"small.txt"),
+        "sub-1-MiB rows are not persisted, so they cannot be rects"
+    );
+
+    // root= re-roots AND re-lays-out: the subtree root fills the new bounds.
+    let sub = format!("{root}/sub");
+    let v: serde_json::Value = s
+        .get(&format!(
+            "/scans/{id}/treemap?width=200&height=100&root={sub}"
+        ))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["rootPath"].as_str().unwrap(), sub);
+    let rects = v["rects"].as_array().unwrap();
+    assert!(rects.iter().all(|r| r["path"].as_str().unwrap().starts_with(&sub)));
+    assert_eq!(rects[0]["width"], 200.0, "re-laid-out at the requested size");
+    assert_eq!(rects[0]["height"], 100.0);
+    // The re-rooted total is sub's aggregate — including its filtered file.
+    let sub_entry: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={sub}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["totalSize"], sub_entry["diskSize"]);
+
+    // maxDepth=0 → only the root rect.
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/treemap?maxDepth=0"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["rects"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn treemap_error_branches() {
+    let s = TestServer::start().await;
+    let (root, id, _done) = s.scan_fixture().await;
+
+    // Unknown re-root path → 404; re-root on a file → 400.
+    let resp = s
+        .get(&format!("/scans/{id}/treemap?root={root}/nope"))
+        .await;
+    assert_eq!(resp.status(), 404);
+    let resp = s
+        .get(&format!("/scans/{id}/treemap?root={root}/big.bin"))
+        .await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("directory"));
+
+    // Bad geometry → 400, error-shaped, naming the parameter.
+    for query in ["width=abc", "width=0", "height=-5", "maxDepth=x", "maxDepth=-1"] {
+        let resp = s.get(&format!("/scans/{id}/treemap?{query}")).await;
+        assert_eq!(resp.status(), 400, "{query} must be rejected");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        assert!(v["error"].is_string(), "{query} rejection must be error-shaped");
+    }
+
+    // Unknown scan → 404.
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/treemap")
+        .await;
+    assert_eq!(resp.status(), 404);
+}
+
+// --- Tree / entry ------------------------------------------------------------
+
+#[tokio::test]
+async fn tree_lists_direct_children_of_root_and_of_a_path() {
+    let s = TestServer::start().await;
+    let (root, id, _done) = s.scan_fixture().await;
+
+    // Default: the scan root's direct children, path-ordered. small.txt's
+    // row was filtered at persistence, and so (1.1.1) was empty/'s — a
+    // 0-byte subtree; it is still counted in the root's dirCount.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/tree")).await.json().await.unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["big.bin", "sub"]);
+
+    // Directories carry their persisted aggregates on this surface.
+    let sub = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "sub")
+        .unwrap();
+    assert!(sub["diskSize"].as_u64().unwrap() >= 2 * MIB);
+
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/tree?path={root}/sub"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["medium.log"]);
+
+    // Error branches: unknown path 404, file path 400, unknown scan 404.
+    let resp = s.get(&format!("/scans/{id}/tree?path={root}/nope")).await;
+    assert_eq!(resp.status(), 404);
+    let resp = s
+        .get(&format!("/scans/{id}/tree?path={root}/big.bin"))
+        .await;
+    assert_eq!(resp.status(), 400);
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/tree")
+        .await;
+    assert_eq!(resp.status(), 404);
+}
+
+/// 1.1.1 (phantom-cnr.10): directory rows obey the 1 MiB rule, and the
+/// readers say so. The tree here has every shape the rule produces:
+///
+///   root/cache/{a,b}/f0..f299 (4 KiB each) → cache/ aggregates 1.2 MiB and
+///                     KEEPS its row with fileCount 300 / dirCount 2, yet has
+///                     NO persisted children (a/ and b/ are 600 KiB each);
+///   root/sub/deep/nested.blob (1 MiB + 4 KiB) → nesting at depth 2 stays
+///                     reachable level by level;
+///   root/empty/       → 0 bytes, no row.
+///
+/// Mutation-proofs: return the bare "path … in scan …" 404 and the
+/// `NOT_INDIVIDUALLY_PERSISTED` assertions fail; keep every directory again
+/// and `/tree` lists a/, b/ and empty/ (the exact-set assertions fail).
+#[tokio::test]
+async fn folded_directories_are_explained_and_kept_rows_show_their_counts() {
+    let s = TestServer::start().await;
+    let root = s.dir.path().join("folded");
+    for sub in ["cache/a", "cache/b", "sub/deep", "empty"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    for i in 0..300 {
+        let parent = if i % 2 == 0 { "cache/a" } else { "cache/b" };
+        std::fs::write(root.join(parent).join(format!("f{i}")), vec![1u8; 4096]).unwrap();
+    }
+    std::fs::write(root.join("sub/deep/nested.blob"), vec![2u8; MIB as usize + 4096]).unwrap();
+    let root = root.display().to_string();
+    let id = s.start_scan(&root).await;
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "complete");
+    assert_eq!(done["dirCount"], 7, "root + cache, a, b, sub, deep, empty — the WALK saw them all");
+
+    let names_at = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect()
+    };
+
+    // Root listing: exactly the rows the rule keeps — no a/, b/ or empty/.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/tree")).await.json().await.unwrap();
+    assert_eq!(names_at(&v), vec!["cache", "sub"]);
+
+    // A kept directory with counts but no persisted children: the listing
+    // is honestly empty and the row carries the full-walk counts a client
+    // renders instead of an empty pane.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/tree?path={root}/cache")).await.json().await.unwrap();
+    assert_eq!(v, serde_json::json!([]), "a/ and b/ are 600 KiB each: no rows");
+    let cache: serde_json::Value = s.get(&format!("/scans/{id}/entry?path={root}/cache")).await.json().await.unwrap();
+    assert_eq!(cache["isDir"], true);
+    assert_eq!(cache["fileCount"], 300);
+    assert_eq!(cache["dirCount"], 2);
+    assert_eq!(cache["diskSize"].as_u64().unwrap(), 300 * 4096);
+
+    // Nesting: depth 2 is reached level by level, never by a flattened list.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/tree?path={root}/sub")).await.json().await.unwrap();
+    assert_eq!(names_at(&v), vec!["deep"]);
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/tree?path={root}/sub/deep")).await.json().await.unwrap();
+    assert_eq!(names_at(&v), vec!["nested.blob"]);
+
+    // The honest miss, on every reader that takes a path: 404, and the body
+    // names the rule and the nearest ancestor that has the bytes.
+    for (route, path, ancestor) in [
+        ("entry?path", format!("{root}/empty"), root.clone()),
+        ("entry?path", format!("{root}/cache/a"), format!("{root}/cache")),
+        ("entry?path", format!("{root}/cache/a/f0"), format!("{root}/cache")),
+        ("tree?path", format!("{root}/cache/b"), format!("{root}/cache")),
+        ("treemap?root", format!("{root}/empty"), root.clone()),
+    ] {
+        let resp = s.get(&format!("/scans/{id}/{route}={path}")).await;
+        assert_eq!(resp.status(), 404, "{route} {path}");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains("not individually persisted"), "{route} {path}: {msg}");
+        assert!(msg.contains(&format!("{ancestor:?}")), "{route} {path} must name {ancestor}: {msg}");
+        assert!(msg.contains(&format!("{path:?}")), "{route} must echo the asked path: {msg}");
+    }
+    // Outside the scan root there is no ancestor to blame: the plain 404.
+    let resp = s.get(&format!("/scans/{id}/entry?path=/no/such/place")).await;
+    assert_eq!(resp.status(), 404);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(!v["error"].as_str().unwrap().contains("not individually persisted"), "{v}");
+
+    // The treemap over such a tree: cache/ is a rect with no child rects,
+    // its whole size the residual — never a zero-size or missing tile.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/treemap?maxDepth=3")).await.json().await.unwrap();
+    let rects = v["rects"].as_array().unwrap();
+    assert!(rects.iter().any(|r| r["name"] == "cache" && r["isDir"] == true));
+    assert!(!rects.iter().any(|r| r["name"] == "a" || r["name"] == "b" || r["name"] == "empty"));
+    assert!(rects.iter().any(|r| r["name"] == "nested.blob"), "depth-2 file laid out: {v}");
+}
+
+#[tokio::test]
+async fn entry_returns_one_row_and_validates_its_params() {
+    let s = TestServer::start().await;
+    let (root, id, _done) = s.scan_fixture().await;
+
+    let v: serde_json::Value = s
+        .get(&format!("/scans/{id}/entry?path={root}/big.bin"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["name"], "big.bin");
+    assert_eq!(v["isDir"], false);
+    assert_eq!(v["fileType"], "bin");
+    assert_eq!(v["diskSize"].as_u64().unwrap(), MIB);
+
+    let resp = s.get(&format!("/scans/{id}/entry")).await;
+    assert_eq!(resp.status(), 400, "path param is required");
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("path"));
+
+    let resp = s.get(&format!("/scans/{id}/entry?path={root}/nope")).await;
+    assert_eq!(resp.status(), 404);
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/entry?path=/x")
+        .await;
+    assert_eq!(resp.status(), 404);
+}
+
+// --- Files: filters, sort, pagination -----------------------------------------
+
+#[tokio::test]
+async fn files_filters_sorts_and_paginates() {
+    let s = TestServer::start().await;
+    let (root, id, _done) = s.scan_fixture().await;
+    let base = format!("/scans/{id}/files");
+
+    // fileType is matched case-generously (stored lowercase).
+    for ft in ["log", "LOG"] {
+        let v: serde_json::Value = s
+            .get(&format!("{base}?fileType={ft}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let items = v.as_array().unwrap();
+        assert_eq!(items.len(), 1, "fileType={ft}");
+        assert_eq!(items[0]["name"], "medium.log");
+    }
+
+    // search: substring on the full path.
+    let v: serde_json::Value = s
+        .get(&format!("{base}?search=big"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["name"], "big.bin");
+    let v: serde_json::Value = s
+        .get(&format!("{base}?search=/sub/"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v[0]["name"], "medium.log");
+
+    // sort=name flips the size-desc default order.
+    let v: serde_json::Value = s
+        .get(&format!("{base}?sort=name"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["big.bin", "medium.log"]);
+
+    // Continuation-token pagination, template idiom: X-Next-Cursor header,
+    // bare-array body, no spurious cursor on the last page.
+    let resp = s.get(&format!("{base}?limit=1")).await;
+    let cursor = resp
+        .headers()
+        .get("x-next-cursor")
+        .expect("more rows remain → X-Next-Cursor present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let page1: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page1.as_array().unwrap().len(), 1);
+    assert_eq!(page1[0]["name"], "medium.log");
+
+    let resp = s.get(&format!("{base}?limit=1&cursor={cursor}")).await;
+    assert!(
+        resp.headers().get("x-next-cursor").is_none(),
+        "last page must not advertise a continuation"
+    );
+    let page2: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page2[0]["name"], "big.bin");
+
+    // Bad params → 400, error-shaped, naming the parameter.
+    for (query, needle) in [
+        ("sort=bogus", "sort"),
+        ("limit=nope", "limit"),
+        ("limit=0", "limit"),
+        ("cursor=xyz", "cursor"),
+    ] {
+        let resp = s.get(&format!("{base}?{query}")).await;
+        assert_eq!(resp.status(), 400, "{query}");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains(needle),
+            "{query} error must name the parameter: {v}"
+        );
+    }
+
+    // A filter that matches nothing is an empty page, not an error.
+    let v: serde_json::Value = s
+        .get(&format!("{base}?fileType=zzz&search={root}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 0);
+
+    // Unknown scan → 404; malformed uuid → 400.
+    let resp = s
+        .get("/scans/e7ae86e2-308b-444c-8a3d-cd21467ab442/files")
+        .await;
+    assert_eq!(resp.status(), 404);
+    let resp = s.get("/scans/not-a-uuid/files").await;
+    assert_eq!(resp.status(), 400);
+}
+
+// --- Validation & auth ---------------------------------------------------------
+
+#[tokio::test]
+async fn create_scan_validates_its_body() {
+    let s = TestServer::start().await;
+
+    // Missing field and unknown field are loud 422s in the {error} shape.
+    let resp = s.post("/scans", serde_json::json!({})).await;
+    assert_eq!(resp.status(), 422);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].is_string());
+
+    let resp = s
+        .post(
+            "/scans",
+            serde_json::json!({ "rootPath": "/tmp", "maxDepth": 3 }),
+        )
+        .await;
+    assert_eq!(resp.status(), 422);
+
+    // Wire contract is camelCase; snake_case is an unknown field, not an alias.
+    let resp = s
+        .post("/scans", serde_json::json!({ "root_path": "/tmp" }))
+        .await;
+    assert_eq!(resp.status(), 422);
+
+    // Empty, nonexistent, and non-directory roots fail NOW (400), not as a
+    // `failed` scan to discover by polling.
+    let resp = s.post("/scans", serde_json::json!({ "rootPath": "  " })).await;
+    assert_eq!(resp.status(), 400);
+
+    let resp = s
+        .post("/scans", serde_json::json!({ "rootPath": "/no/such/dir/anywhere" }))
+        .await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("not a directory"));
+
+    let file = s.dir.path().join("plain.txt");
+    std::fs::write(&file, "not a dir").unwrap();
+    let resp = s
+        .post(
+            "/scans",
+            serde_json::json!({ "rootPath": file.display().to_string() }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+
+    // Nothing was registered or persisted by any of the rejects.
+    let v: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn scan_routes_require_the_api_key() {
+    let s = TestServer::start().await;
+    let (_root, id, _done) = s.scan_fixture().await;
+
+    for path in [
+        "/scans".to_string(),
+        format!("/scans/{id}"),
+        format!("/scans/{id}/treemap"),
+        format!("/scans/{id}/tree"),
+        format!("/scans/{id}/files"),
+        format!("/scans/{id}/entry?path=/x"),
+        format!("/scans/{id}/types"),
+        format!("/scans/{id}/hotspots"),
+    ] {
+        let resp = reqwest::get(format!("{}{path}", s.base)).await.unwrap();
+        assert_eq!(resp.status(), 401, "GET {path} without key");
+        let resp = reqwest::Client::new()
+            .get(format!("{}{path}", s.base))
+            .header("x-api-key", "wrong-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "GET {path} with wrong key");
+    }
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/scans", s.base))
+        .json(&serde_json::json!({ "rootPath": "/tmp" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/scans/{id}", s.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+// --- API-wide contract (ported from the retired Note slice's suite) -----------
+
+// R2 (freeze review): query params are STRICT. An unknown/misspelled query
+// key on a results route is a 400 naming the field, not a silently
+// unfiltered listing — `?filetype=` quietly returning EVERY file is the
+// failure mode this kills. Mutation-proof: drop `deny_unknown_fields` from
+// FilesParams and this goes green-to-red.
+// The 415 row (freeze review R7): a POST body without the JSON
+// content-type is 415, re-clothed as {error} like every non-2xx.
+#[tokio::test]
+async fn post_without_json_content_type_is_415_with_error_shape() {
+    let s = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/scans", s.base))
+        .header("x-api-key", KEY)
+        .header("content-type", "text/plain")
+        .body("{\"rootPath\": \"/tmp\"}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 415);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v.get("error").is_some(), "415 must keep the {{error}} shape");
+}
+
+#[tokio::test]
+async fn unknown_query_keys_are_rejected_with_the_error_shape() {
+    let s = TestServer::start().await;
+    let (_root, id, _done) = s.scan_fixture().await;
+
+    let resp = s.get(&format!("/scans/{id}/files?filetype=rs")).await;
+    assert_eq!(resp.status(), 400, "misspelled key must not mean 'unfiltered'");
+    let v: serde_json::Value = resp.json().await.unwrap();
+    let msg = v["error"].as_str().expect("{error} shape");
+    assert!(msg.contains("filetype"), "the rejection names the field: {msg}");
+
+    // The other strict result routes, spot-checked.
+    for path in [
+        format!("/scans/{id}/treemap?depth=2"),
+        format!("/scans/{id}/tree?root=/x"),
+        format!("/scans/{id}/entry?file=/x"),
+    ] {
+        let resp = s.get(&path).await;
+        assert_eq!(resp.status(), 400, "GET {path}");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        assert!(v.get("error").is_some(), "GET {path} must keep the {{error}} shape");
+    }
+}
+
+
+#[tokio::test]
+async fn health_is_open_and_reports_version() {
+    let s = TestServer::start().await;
+    // Deliberately no api key header.
+    let resp = reqwest::get(format!("{}/health", s.base)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["status"], "ok");
+    assert!(v["version"].is_string());
+}
+
+#[tokio::test]
+async fn builtin_404_and_405_use_the_error_shape() {
+    // agentapi L2: unmatched routes (404) and wrong-method (405) must not be
+    // empty-bodied — they go through the `{error}` contract too. Revert the
+    // `error_shape_fallback` layer and these bodies are empty → this fails.
+    let s = TestServer::start().await;
+
+    // Unmatched route → 404 JSON (no auth needed; it is not under /scans).
+    let resp = s.get("/nonexistent").await;
+    assert_eq!(resp.status(), 404);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["error"], "no such route");
+
+    // Wrong method on a real route → 405 JSON (send the key so we pass auth
+    // and reach the method router; /scans routes GET and POST only).
+    let resp = s.delete("/scans").await;
+    assert_eq!(resp.status(), 405);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["error"], "method not allowed");
+}
+
+#[tokio::test]
+async fn uppercase_uuid_is_accepted_in_path() {
+    let s = TestServer::start().await;
+    let (_root, id, _done) = s.scan_fixture().await;
+    let resp = s.get(&format!("/scans/{}", id.to_uppercase())).await;
+    assert_eq!(resp.status(), 200);
+    // Canonical form comes back lowercase regardless of the path's casing.
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["id"], id.to_lowercase());
+}
+
+/// The walker's own cancel flag is what the SIGTERM drain flips
+/// (`registry.cancel_all()`, wired in main.rs). Process-level signal
+/// delivery can't run inside this harness; this pins the same seam the
+/// drain uses: cancel_all → walker bails → cancelled row lands in SQLite.
+#[tokio::test]
+async fn cancel_all_drains_an_in_flight_scan_to_a_cancelled_row() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+
+    assert_eq!(s.state.registry.cancel_all(), 1);
+    s.release_scan();
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "cancelled");
+
+    // The row is in SQLite, not just registry memory — it survives a "restart"
+    // (a fresh store connection).
+    let store = ScanStore::open(&s.db).unwrap();
+    let scan = store.get_scan(Uuid::parse_str(&id).unwrap()).unwrap();
+    assert_eq!(scan.status.as_str(), "cancelled");
+}
+
+// --- Scan diff (phantom-081) -------------------------------------------------
+
+/// Entry builder for synthetic diff scans; sizes are already what the walk
+/// would produce (persist aggregates dirs from the file rows below them).
+fn diff_entry(path: &str, parent: Option<&str>, disk: u64, is_dir: bool) -> ScanEntry {
+    ScanEntry {
+        path: path.into(),
+        parent_path: parent.map(Into::into),
+        name: std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        is_dir,
+        disk_size: disk,
+        logical_size: disk,
+        modified_at: None,
+        file_type: None,
+        category: None,
+        nlink: 1,
+        dev: 1,
+        ino: path.len() as u64 * 31 + disk, // unique-enough per fixture
+        file_count: None,
+        dir_count: None,
+        private_size: None,
+        shared_size: None,
+        clone_id: None,
+        flags: None,
+    }
+}
+
+fn finish_synthetic(s: &TestServer, root: &str, files: &[(&str, &str, u64)], dirs: &[(&str, Option<&str>)]) -> Uuid {
+    let scan = Scan::new(root);
+    let id = scan.id;
+    s.state.registry.register(scan);
+    let mut entries = vec![diff_entry(root, None, 0, true)];
+    for (path, parent) in dirs {
+        entries.push(diff_entry(path, Some(parent.unwrap_or(root)), 0, true));
+    }
+    let mut total = 0;
+    for (path, parent, size) in files {
+        entries.push(diff_entry(path, Some(parent), *size, false));
+        total += size;
+    }
+    let outcome = ScanOutcome {
+        entries,
+        total_disk_size: total,
+        total_logical_size: total,
+        file_count: files.len() as u64,
+        dir_count: 1 + dirs.len() as u64,
+        error_count: 0,
+        unreadable: Vec::new(),
+        shares: phantom_core::ShareLedger::new(),
+    };
+    finish_scan(&s.state, id, Ok(outcome));
+    id
+}
+
+/// The full arc: grown (created dir, before null), freed (vanished dir,
+/// after null), exact top-level deltas — over the REAL router and store.
+#[tokio::test]
+async fn diff_reports_grown_freed_and_exact_totals() {
+    let s = TestServer::start().await;
+    let a = finish_synthetic(
+        &s,
+        "/synthroot",
+        &[("/synthroot/big/a.bin", "/synthroot/big", 60 * MIB)],
+        &[("/synthroot/big", None)],
+    );
+    let b = finish_synthetic(
+        &s,
+        "/synthroot",
+        &[("/synthroot/new/b.bin", "/synthroot/new", 8 * MIB)],
+        &[("/synthroot/new", None)],
+    );
+
+    let resp = s.get(&format!("/scans/{a}/diff/{b}")).await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["rootPath"], "/synthroot");
+    assert_eq!(v["diskDelta"], -(52 * MIB as i64));
+    assert_eq!(v["fileCountDelta"], 0);
+    assert_eq!(
+        v["grown"][0]["path"], "/synthroot/new",
+        "created dir grows from null"
+    );
+    assert!(v["grown"][0]["before"].is_null());
+    let freed_paths: Vec<&str> = v["freed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(freed_paths, vec!["/synthroot/big", "/synthroot"], "-60MiB before -52MiB");
+    assert!(v["freed"][0]["after"].is_null(), "vanished dir frees to null");
+
+    // Positional direction: swapping the ids flips every sign.
+    let resp = s.get(&format!("/scans/{b}/diff/{a}")).await;
+    let flipped: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(flipped["diskDelta"], 52 * MIB as i64);
+}
+
+#[tokio::test]
+async fn diff_rejects_root_mismatch_with_400() {
+    let s = TestServer::start().await;
+    let a = finish_synthetic(&s, "/rootA", &[], &[]);
+    let b = finish_synthetic(&s, "/rootB", &[], &[]);
+    let resp = s.get(&format!("/scans/{a}/diff/{b}")).await;
+    assert_eq!(resp.status(), 400);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("different roots"));
+}
+
+#[tokio::test]
+async fn diff_against_a_running_scan_is_409() {
+    let s = TestServer::start().await;
+    let a = finish_synthetic(&s, "/synthroot", &[], &[]);
+    let running = Scan::new("/synthroot");
+    let running_id = running.id;
+    s.state.registry.register(running);
+    let resp = s.get(&format!("/scans/{a}/diff/{running_id}")).await;
+    assert_eq!(resp.status(), 409);
+}
+
+// --- Phase 2: classifier honesty over the wire ---------------------------------
+
+/// The v1.1 honesty fields reach the wire, the threshold is validated at
+/// request time, and the opt-in probes stay OFF unless asked.
+#[tokio::test]
+async fn hotspot_groups_carry_tier_why_and_rebuild_cost() {
+    let s = TestServer::start().await;
+    // A Cargo project WITH its lockfile, so the tier is provably safe.
+    let root = s.dir.path().join("locked");
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    std::fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+    std::fs::write(root.join("target/debug.bin"), vec![7u8; MIB as usize]).unwrap();
+    let root = root.display().to_string();
+
+    let id = s.start_scan(&root).await;
+    s.poll_terminal(&id).await;
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/hotspots")).await.json().await.unwrap();
+    let g = &v["groups"][0];
+    assert_eq!(g["ruleId"], "cargo-target");
+    assert_eq!(g["riskTier"], "safe");
+    assert!(g["why"].as_str().unwrap().contains("a lockfile pins the dependency versions"), "{g}");
+    assert_eq!(g["rebuildCost"]["kind"], "compile");
+    assert!(g["rebuildCost"]["estimate"].as_str().unwrap().starts_with("re-compile"), "{g}");
+    // Off by default: no probe ran, so no tool estimate — present-as-null.
+    assert!(g.as_object().unwrap().contains_key("toolEstimate"));
+    assert!(g["toolEstimate"].is_null());
+
+    // Mutation target (the plan's #3): delete the lockfile and rescan — the
+    // tier drops from safe and the why says why.
+    std::fs::remove_file(format!("{root}/Cargo.lock")).unwrap();
+    let id = s.start_scan(&root).await;
+    s.poll_terminal(&id).await;
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/hotspots")).await.json().await.unwrap();
+    let g = &v["groups"][0];
+    assert_eq!(g["riskTier"], "caution", "{g}");
+    assert!(g["why"].as_str().unwrap().contains("no lockfile (Cargo.lock)"), "{g}");
+}
+
+#[tokio::test]
+async fn older_than_is_validated_now_and_moves_the_dormancy_boundary() {
+    let s = TestServer::start().await;
+    let root = s.build_hotspot_tree();
+
+    // Malformed thresholds are a 400 at request time, error-shaped.
+    for bad in ["3m", "0d", "soon", "-1d"] {
+        let resp = s
+            .post("/scans", serde_json::json!({ "rootPath": root, "olderThan": bad }))
+            .await;
+        assert_eq!(resp.status(), 400, "olderThan {bad:?}");
+        let v: serde_json::Value = resp.json().await.unwrap();
+        assert!(v["error"].as_str().unwrap().contains("olderThan"), "{v}");
+    }
+    // A wrong TYPE is the body-shape 422, like any other malformed field.
+    let resp = s
+        .post("/scans", serde_json::json!({ "rootPath": root, "olderThan": 90 }))
+        .await;
+    assert_eq!(resp.status(), 422);
+
+    // A project whose sources are 40 days old: dormant at 1M, active at 90d.
+    let proj = s.dir.path().join("aging");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::create_dir_all(proj.join("target")).unwrap();
+    std::fs::write(proj.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(proj.join("Cargo.lock"), "# lock\n").unwrap();
+    std::fs::write(proj.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(proj.join("target/debug.bin"), vec![1u8; MIB as usize]).unwrap();
+    let forty_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+    for f in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+        std::fs::File::open(proj.join(f)).unwrap().set_modified(forty_days_ago).unwrap();
+    }
+    // The artifact was "touched" just now: artifact mtimes must not matter.
+    let proj = proj.display().to_string();
+
+    async fn group_at(s: &TestServer, proj: &str, older: Option<&str>) -> serde_json::Value {
+        let mut body = serde_json::json!({ "rootPath": proj });
+        if let Some(o) = older {
+            body["olderThan"] = serde_json::json!(o);
+        }
+        let resp = s.post("/scans", body).await;
+        assert_eq!(resp.status(), 202);
+        let v: serde_json::Value = resp.json().await.unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        s.poll_terminal(&id).await;
+        let v: serde_json::Value = s.get(&format!("/scans/{id}/hotspots")).await.json().await.unwrap();
+        v["groups"][0].clone()
+    }
+    let default = group_at(&s, &proj, None).await;
+    assert_eq!(default["category"], "regenerableArtifact", "40 days is not dormant at the 90-day default: {default}");
+    let month = group_at(&s, &proj, Some("1M")).await;
+    assert_eq!(month["category"], "staleProjectArtifact", "{month}");
+    assert!(month["why"].as_str().unwrap().contains("at least 30 days old"), "{month}");
+    assert_eq!(month["riskTier"], "safe", "staleness ranks; the lockfile still makes it safe");
+}
+
+/// The opt-in verify probe: a Cargo project whose Cargo.toml is not a real
+/// manifest fails `cargo metadata --locked`, so the tier drops to caution
+/// and the why names the command — when cargo is at a fixed path on this
+/// machine. Without it, the verdict is Unavailable and the lockfile alone
+/// keeps the group safe; both branches are the contract.
+#[tokio::test]
+async fn verify_locks_opt_in_lowers_the_tier_when_the_check_fails() {
+    let s = TestServer::start().await;
+    let root = s.dir.path().join("broken");
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "this is not a manifest\n").unwrap();
+    std::fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+    std::fs::write(root.join("target/debug.bin"), vec![7u8; MIB as usize]).unwrap();
+    let root = root.display().to_string();
+
+    let resp = s
+        .post("/scans", serde_json::json!({ "rootPath": root, "verifyLocks": true }))
+        .await;
+    assert_eq!(resp.status(), 202);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+    s.poll_terminal(&id).await;
+    let v: serde_json::Value = s.get(&format!("/scans/{id}/hotspots")).await.json().await.unwrap();
+    let g = &v["groups"][0];
+    assert_eq!(g["ruleId"], "cargo-target");
+    if phantom_core::probe::resolve("cargo").is_some() {
+        assert_eq!(g["riskTier"], "caution", "a failed verify is not safe: {g}");
+        assert!(g["why"].as_str().unwrap().contains("verification failed (`cargo metadata"), "{g}");
+    } else {
+        assert_eq!(g["riskTier"], "safe", "no cargo at a fixed path: unverified, lockfile counts: {g}");
+        assert!(g["why"].as_str().unwrap().ends_with("pins the dependency versions."), "{g}");
+    }
+    // Nothing was written into the project by the probe.
+    let names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["Cargo.lock", "Cargo.toml", "target"], "verify must not write: {names:?}");
+}
+
+// --- Persisted running scans (phantom-aoa, schema v6) ---------------------------
+
+/// The running row goes into SQLite at POST time; the terminal handoff
+/// upserts it. While it runs, the read side serves the DB row with the
+/// registry's live progress, results are 409 (not an empty 200 — the row
+/// exists but has no entries yet) and delete is refused.
+#[tokio::test]
+async fn running_scan_is_persisted_at_start_and_upserted_at_the_end() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+    let uuid: Uuid = id.parse().unwrap();
+
+    // A second connection (what the next server process would open) sees
+    // the running row already.
+    let peek = ScanStore::open(&s.db).unwrap();
+    let row = peek.get_scan(uuid).unwrap();
+    assert_eq!(row.status, phantom_core::ScanStatus::Running);
+    assert_eq!(row.failure_reason, None);
+
+    // The API merges live progress onto the persisted row.
+    let v: serde_json::Value = s.get(&format!("/scans/{id}")).await.json().await.unwrap();
+    assert_eq!(v["status"], "running");
+    assert!(v["progress"].is_object(), "running row must carry live progress: {v}");
+    assert!(v["failureReason"].is_null());
+    let list: serde_json::Value = s.get("/scans").await.json().await.unwrap();
+    let listed: Vec<&serde_json::Value> =
+        list.as_array().unwrap().iter().filter(|x| x["id"] == id).collect();
+    assert_eq!(listed.len(), 1, "listed exactly once (DB row + registry merge)");
+    assert!(listed[0]["progress"].is_object());
+
+    // Results are 409, not an empty 200 off the row with no entries —
+    // mutation-proof: drop the Running check in persisted_scan.
+    for path in ["types", "hotspots", "files", "treemap"] {
+        let resp = s.get(&format!("/scans/{id}/{path}")).await;
+        assert_eq!(resp.status(), 409, "/{path} on a running persisted row");
+    }
+    let resp = s.delete(&format!("/scans/{id}")).await;
+    assert_eq!(resp.status(), 409, "delete of a running persisted row");
+
+    s.release_scan();
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "complete");
+    let row = peek.get_scan(uuid).unwrap();
+    assert_eq!(row.status, phantom_core::ScanStatus::Complete, "the upsert replaced the running row");
+    assert_eq!(peek.list_scans().unwrap().iter().filter(|x| x.id == uuid).count(), 1);
+    assert!(row.total_disk_size > 0);
+}
+
+/// A server that dies mid-walk leaves a running row. The NEXT process marks
+/// it interrupted at cold start — before its first request — so the scan
+/// reads as failed with a reason instead of running forever.
+#[tokio::test]
+async fn cold_start_marks_orphaned_running_scans_interrupted() {
+    let old = TestServer::start_held().await; // its worker never releases: "died"
+    let root = old.build_fixture_tree();
+    let id = old.start_scan(&root).await;
+    let uuid: Uuid = id.parse().unwrap();
+
+    // Second process over the same database.
+    let fresh = AppState::new(ScanStore::open(&old.db).unwrap(), KEY.into());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, build_router(fresh)).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let v: serde_json::Value = client
+        .get(format!("{base}/scans/{id}"))
+        .header("x-api-key", KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["status"], "failed", "orphaned running row must read failed: {v}");
+    assert_eq!(v["failureReason"], phantom_api::INTERRUPTED_REASON);
+    assert!(v["finishedAt"].is_string(), "interrupted scans are terminal");
+    assert!(v["progress"].is_null());
+
+    // Terminal now: results answer (empty), delete works.
+    let resp = client
+        .get(format!("{base}/scans/{id}/types"))
+        .header("x-api-key", KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .delete(format!("{base}/scans/{id}"))
+        .header("x-api-key", KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert!(ScanStore::open(&old.db).unwrap().get_scan(uuid).is_err());
+}
+
+/// A walk that errors persists WHY. Mutation-proof: drop the
+/// `failure_reason = Some(e.to_string())` line in finish_scan_with.
+#[tokio::test]
+async fn failed_scan_carries_the_walker_reason() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+    let id = s.start_scan(&root).await;
+    let uuid: Uuid = id.parse().unwrap();
+    finish_scan(
+        &s.state,
+        uuid,
+        Err(phantom_core::ScanError::NotADirectory("/gone".into())),
+    );
+    let v: serde_json::Value = s.get(&format!("/scans/{id}")).await.json().await.unwrap();
+    assert_eq!(v["status"], "failed");
+    assert_eq!(v["failureReason"], "not a directory: /gone");
+    // And a cancelled scan has none.
+    let id2 = s.start_scan(&root).await;
+    let uuid2: Uuid = id2.parse().unwrap();
+    s.state.registry.request_cancel(uuid2);
+    finish_scan(&s.state, uuid2, Err(phantom_core::ScanError::Cancelled));
+    let v: serde_json::Value = s.get(&format!("/scans/{id2}")).await.json().await.unwrap();
+    assert_eq!(v["status"], "cancelled");
+    assert!(v["failureReason"].is_null());
+}
+
+// --- Compaction (1.1.1, phantom-cnr.2) ----------------------------------------
+
+/// DELETE gives the pages back before it answers: the file shrinks by most of
+/// what the deleted scan added, on the same request, so "deleted" is true on
+/// the filesystem too. A fresh test database is INCREMENTAL (ScanStore::open
+/// sets it), so this is the everyday path, not the guarded one-time VACUUM.
+/// Mutation target: drop `compact_after_write` from `delete_scan` and the file
+/// keeps every page.
+#[tokio::test]
+async fn delete_returns_the_scans_pages_to_the_filesystem() {
+    let s = TestServer::start_held().await;
+    let root = s.build_fixture_tree();
+    let before = std::fs::metadata(&s.db).unwrap().len();
+
+    // Persist a scan with real pages behind it, bypassing the parked walker.
+    let id = s.start_scan(&root).await;
+    let mut entries = Vec::new();
+    for d in 0..80 {
+        let dir = format!("{root}/svc-{d:04}/src/components");
+        for f in 0..49 {
+            entries.push(ScanEntry {
+                path: format!("{dir}/module-{f:02}.generated.ts"),
+                parent_path: Some(dir.clone()),
+                name: format!("module-{f:02}.generated.ts"),
+                is_dir: false,
+                disk_size: 2 * MIB,
+                logical_size: 2 * MIB,
+                modified_at: None,
+                file_type: Some("ts".into()),
+                category: None,
+                nlink: 1,
+                dev: 1,
+                ino: (10_000 + d * 64 + f) as u64,
+                file_count: None,
+                dir_count: None,
+                private_size: None,
+                shared_size: None,
+                clone_id: None,
+                flags: None,
+            });
+        }
+    }
+    let outcome = ScanOutcome {
+        entries,
+        total_disk_size: 80 * 49 * 2 * MIB,
+        total_logical_size: 80 * 49 * 2 * MIB,
+        file_count: 80 * 49,
+        dir_count: 80,
+        error_count: 0,
+        unreadable: Vec::new(),
+        shares: phantom_core::ShareLedger::new(),
+    };
+    finish_scan(&s.state, Uuid::parse_str(&id).unwrap(), Ok(outcome));
+    let with_scan = std::fs::metadata(&s.db).unwrap().len();
+    let added = with_scan - before;
+    assert!(added > 1_000_000, "the fixture must cost real pages: {added}");
+
+    let resp = s.delete(&format!("/scans/{id}")).await;
+    assert_eq!(resp.status(), 204);
+    let after = std::fs::metadata(&s.db).unwrap().len();
+    assert!(
+        with_scan - after >= added * 8 / 10,
+        "DELETE must return ≥ 80% of the {added} bytes the scan added; file went {with_scan} → {after}"
+    );
+    let wal = std::fs::metadata(format!("{}-wal", s.db.display())).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(wal, 0, "compaction leaves the WAL truncated");
+}
+
+// --- Provenance (phantom-cnr.7) ------------------------------------------
+
+/// Capture the API's tracing output for assertions. One global subscriber
+/// per test binary (tracing allows exactly one), so every test's lines land
+/// in the same buffer; assertions filter by scan id.
+mod logs {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Clone, Default)]
+    pub struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl Sink {
+        pub fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    static SINK: OnceLock<Sink> = OnceLock::new();
+
+    pub fn capture() -> Sink {
+        SINK.get_or_init(|| {
+            let sink = Sink::default();
+            tracing_subscriber::fmt()
+                .with_writer(sink.clone())
+                .with_ansi(false)
+                .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+                .try_init()
+                .ok();
+            sink
+        })
+        .clone()
+    }
+}
+
+/// Every POST /scans leaves exactly one `scan requested` line naming the
+/// root, every option and the caller's User-Agent; completion leaves a
+/// `scan finished` line with rows and estimated bytes, and the retention
+/// pass reports its numbers whether or not it pruned. Mutations: drop the
+/// start log and the count assertion fails; drop the UA field and the
+/// client assertion fails; make the retention line conditional again and
+/// the retention assertion fails.
+#[tokio::test]
+async fn every_post_scans_leaves_an_attributable_log_line() {
+    let logs = logs::capture();
+    let s = TestServer::start().await;
+    let root = s.build_fixture_tree();
+
+    let resp = s
+        .client
+        .post(format!("{}/scans", s.base))
+        .header("x-api-key", KEY)
+        .header("user-agent", "phantom-test/9.9 (+probe)")
+        .json(&serde_json::json!({ "rootPath": root, "crossVolumes": true, "olderThan": "3M" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let done = s.poll_terminal(&id).await;
+    assert_eq!(done["status"], "complete");
+
+    let text = logs.text();
+    let requested: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("scan requested") && l.contains(&id))
+        .collect();
+    assert_eq!(requested.len(), 1, "exactly one start line per POST /scans:\n{text}");
+    let line = requested[0];
+    for needle in [
+        format!("root={root}").as_str(),
+        "client=phantom-test/9.9 (+probe)",
+        "cross_volumes=true",
+        "older_than=3M",
+        "verify_locks=false",
+        "tool_estimates=false",
+    ] {
+        assert!(line.contains(needle), "{needle:?} missing from: {line}");
+    }
+    let finished = text
+        .lines()
+        .find(|l| l.contains("scan finished") && l.contains(&id))
+        .unwrap_or_else(|| panic!("no completion line for {id}:\n{text}"));
+    for needle in ["status=complete", "files=4", "rows=", "estimated_db_bytes=", "duration_s="] {
+        assert!(finished.contains(needle), "{needle:?} missing from: {finished}");
+    }
+    let retention = text
+        .lines()
+        .find(|l| l.contains("retention: pruned") && l.contains(&id))
+        .unwrap_or_else(|| panic!("no retention line for {id}:\n{text}"));
+    assert!(
+        retention.contains("pruned 0 scans") && retention.contains("of a 2.0 GiB budget"),
+        "the retention pass reports its numbers even when nothing goes: {retention}"
+    );
+
+    // No User-Agent at all is still attributable — to nobody, honestly.
+    let anon = s.start_scan(&root).await;
+    s.poll_terminal(&anon).await;
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("scan requested") && l.contains(&anon))
+        .expect("start line for the anonymous request");
+    assert!(line.trim_end().ends_with("client=-"), "an absent User-Agent logs as '-': {line}");
+}

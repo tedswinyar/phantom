@@ -1,0 +1,4 @@
+name: spooky
+description: Dark, single-product marketing theme. Every colour and font comes from site params, so a stamped project re-skins by editing hugo.yaml only.
+license: MIT
+min_version: "0.146.0"
